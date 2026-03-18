@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EasyConnect Workbench</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="min-h-screen bg-canvas text-ink antialiased">
+    <div class="pointer-events-none fixed inset-0 overflow-hidden">
+      <div class="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(37,99,235,0.05),transparent_22%),radial-gradient(circle_at_bottom_right,rgba(148,163,184,0.08),transparent_22%)]"></div>
+      <div class="absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.08)_1px,transparent_1px)] bg-[size:40px_40px] opacity-15"></div>
+    </div>
+
+    <div id="toast" class="app-toast hidden">
+      <div id="toast-title" class="app-toast__title">提示</div>
+      <div id="toast-text" class="app-toast__text"></div>
+    </div>
+
+    <div class="relative flex min-h-screen">
+      <aside class="app-sidebar">
+        <div class="app-sidebar__brand">
+          <div class="app-sidebar__logo">
+            <div class="grid h-7 w-7 grid-cols-2 gap-1.5">
+              <span class="rounded-sm bg-accent"></span>
+              <span class="rounded-sm bg-slate-300"></span>
+              <span class="rounded-sm bg-slate-400"></span>
+              <span class="rounded-sm bg-slate-900"></span>
+            </div>
+          </div>
+          <div>
+            <div class="app-sidebar__eyebrow">Operations Deck</div>
+            <div class="app-sidebar__title">EasyConnect Workbench</div>
+          </div>
+        </div>
+
+        <div id="status-banner" class="status-banner">
+          <div class="status-banner__dot"></div>
+          <div>
+            <div class="status-banner__title">状态读取中</div>
+            <div class="status-banner__text">准备连接本地 EasyConnect 运行时。</div>
+          </div>
+        </div>
+
+        <div class="sidebar-metrics">
+          <div class="metric-card">
+            <div class="metric-card__label">登录状态</div>
+            <div id="metric-login-status" class="metric-card__value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-card__label">当前 Session</div>
+            <div id="metric-session-id" class="metric-card__value metric-card__value--mono">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-card__label">客户端路径</div>
+            <div id="metric-client-state" class="metric-card__value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-card__label">网关数量</div>
+            <div id="metric-gateway-count" class="metric-card__value">-</div>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav">
+          <div class="sidebar-nav__group">
+            <div class="sidebar-nav__group-title">EasyConnect</div>
+            <button class="sidebar-nav__item is-active" data-page="vpn-control">
+              <span class="sidebar-nav__item-title">VPN 控制</span>
+              <span class="sidebar-nav__item-meta">账号、路径、网关、恢复登录</span>
+            </button>
+            <button class="sidebar-nav__item" data-page="runtime-status">
+              <span class="sidebar-nav__item-title">运行态</span>
+              <span class="sidebar-nav__item-meta">本地状态、调试目标、日志路径</span>
+            </button>
+          </div>
+
+          <div class="sidebar-nav__group">
+            <div class="sidebar-nav__group-title">Adapters</div>
+            <button class="sidebar-nav__item" data-page="build-portal">
+              <span class="sidebar-nav__item-title">构建站</span>
+              <span class="sidebar-nav__item-meta">构建入口与账号</span>
+            </button>
+            <button class="sidebar-nav__item" data-page="release-portal">
+              <span class="sidebar-nav__item-title">发版站</span>
+              <span class="sidebar-nav__item-meta">发版入口与账号</span>
+            </button>
+          </div>
+
+          <div class="sidebar-nav__group">
+            <div class="sidebar-nav__group-title">History</div>
+            <button class="sidebar-nav__item" data-page="trace-log">
+              <span class="sidebar-nav__item-title">最近结果</span>
+              <span class="sidebar-nav__item-meta">动作轨迹与返回结果</span>
+            </button>
+          </div>
+        </nav>
+
+        <div class="sidebar-footer">
+          <button id="open-logs" class="button button--ghost">打开日志目录</button>
+          <button id="open-config-dir" class="button button--ghost">打开配置目录</button>
+        </div>
+      </aside>
+
+      <main class="app-main">
+        <header class="app-main__header">
+          <div>
+            <div id="page-kicker" class="app-main__kicker">VPN Control</div>
+            <h1 id="page-title" class="app-main__title">EasyConnect</h1>
+            <p id="page-description" class="app-main__description">
+              管理账号、客户端路径、网关列表，以及官方恢复登录链路。
+            </p>
+          </div>
+          <div id="page-actions" class="app-main__actions">
+            <button id="refresh-status" class="button button--primary">刷新状态</button>
+            <button id="recover-login" class="button button--accent">恢复并登录 VPN</button>
+            <button id="launch-client" class="button">拉起官方客户端</button>
+          </div>
+        </header>
+
+        <section id="page-vpn-control" class="page-section is-active">
+          <div class="page-grid">
+            <section class="panel">
+              <div class="panel__header">
+                <div>
+                  <div class="panel__kicker">Credentials</div>
+                  <h3 class="panel__title">VPN 基本信息</h3>
+                </div>
+              </div>
+              <div class="grid gap-4 lg:grid-cols-2">
+                <label class="field">
+                  <span>用户名</span>
+                  <input id="vpn-username" type="text" autocomplete="off" />
+                </label>
+                <label class="field">
+                  <span>密码</span>
+                  <input id="vpn-password" type="password" autocomplete="off" />
+                </label>
+                <label class="field">
+                  <span>调试端口</span>
+                  <input id="vpn-debug-port" type="number" min="1" step="1" />
+                </label>
+                <label class="field">
+                  <span>EasyConnect 路径</span>
+                  <input id="vpn-app-executable" type="text" autocomplete="off" />
+                </label>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel__header">
+                <div>
+                  <div class="panel__kicker">Gateway List</div>
+                  <h3 class="panel__title">网关配置</h3>
+                </div>
+              </div>
+              <label class="field">
+                <span>网关列表</span>
+                <textarea id="vpn-gateways" rows="8" placeholder="每行一个，格式：221.12.173.11:9898"></textarea>
+              </label>
+              <p class="panel__note">后续恢复策略、构建站和发版站接入都会复用这份网关列表。</p>
+            </section>
+          </div>
+
+          <div class="page-grid page-grid--single">
+            <section class="panel">
+              <div class="panel__header">
+                <div>
+                  <div class="panel__kicker">Workflow</div>
+                  <h3 class="panel__title">当前能力</h3>
+                </div>
+              </div>
+              <div class="info-stack">
+                <div class="info-row">
+                  <div class="info-row__title">恢复链路</div>
+                  <div class="info-row__text">官方 `connect.html -> portal -> password vm.login()`</div>
+                </div>
+                <div class="info-row">
+                  <div class="info-row__title">本地依赖</div>
+                  <div class="info-row__text">需要本机已安装 EasyConnect，路径现在可以自定义配置。</div>
+                </div>
+                <div class="info-row">
+                  <div class="info-row__title">保存范围</div>
+                  <div class="info-row__text">配置只写入工作台自己的用户目录，不污染系统其他应用。</div>
+                </div>
+              </div>
+              <div class="mt-5 flex flex-wrap gap-2">
+                <button id="save-config" class="button">保存配置</button>
+                <button id="recover-user-debug" class="button">只恢复客户端</button>
+                <button id="portal-login" class="button">对登录页执行登录</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-runtime-status" class="page-section">
+          <div class="page-grid">
+            <section class="panel">
+              <div class="panel__header">
+                <div>
+                  <div class="panel__kicker">Snapshot</div>
+                  <h3 class="panel__title">本地运行态</h3>
+                </div>
+                <div class="flex gap-2">
+                  <button id="debug-targets" class="button button--ghost">查看调试目标</button>
+                </div>
+              </div>
+              <pre id="vpn-status" class="console-block console-block--short"></pre>
+            </section>
+
+            <section class="panel">
+              <div class="panel__header">
+                <div>
+                  <div class="panel__kicker">Health</div>
+                  <h3 class="panel__title">环境说明</h3>
+                </div>
+              </div>
+              <div class="info-stack">
+                <div class="info-row">
+                  <div class="info-row__title">客户端路径</div>
+                  <div id="runtime-client-path" class="info-row__text">-</div>
+                </div>
+                <div class="info-row">
+                  <div class="info-row__title">Bundle 配置目录</div>
+                  <div id="runtime-bundle-dir" class="info-row__text">-</div>
+                </div>
+                <div class="info-row">
+                  <div class="info-row__title">日志目录</div>
+                  <div id="runtime-logs-dir" class="info-row__text">-</div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-build-portal" class="page-section">
+          <div class="page-grid page-grid--single">
+            <section class="panel">
+              <div class="panel__header">
+                <div>
+                  <div class="panel__kicker">Adapter</div>
+                  <h3 class="panel__title">构建站</h3>
+                </div>
+              </div>
+              <div class="grid gap-4 lg:grid-cols-3">
+                <label class="field">
+                  <span>URL</span>
+                  <input id="build-url" type="text" autocomplete="off" />
+                </label>
+                <label class="field">
+                  <span>用户名</span>
+                  <input id="build-username" type="text" autocomplete="off" />
+                </label>
+                <label class="field">
+                  <span>密码</span>
+                  <input id="build-password" type="password" autocomplete="off" />
+                </label>
+              </div>
+              <p class="panel__note">这里先保留配置能力。等 VPN 链路稳定后，再接真实构建动作。</p>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-release-portal" class="page-section">
+          <div class="page-grid page-grid--single">
+            <section class="panel">
+              <div class="panel__header">
+                <div>
+                  <div class="panel__kicker">Adapter</div>
+                  <h3 class="panel__title">发版站</h3>
+                </div>
+              </div>
+              <div class="grid gap-4 lg:grid-cols-3">
+                <label class="field">
+                  <span>URL</span>
+                  <input id="release-url" type="text" autocomplete="off" />
+                </label>
+                <label class="field">
+                  <span>用户名</span>
+                  <input id="release-username" type="text" autocomplete="off" />
+                </label>
+                <label class="field">
+                  <span>密码</span>
+                  <input id="release-password" type="password" autocomplete="off" />
+                </label>
+              </div>
+              <p class="panel__note">后续这里会接真实发版动作、状态轮询和失败回滚提示。</p>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-trace-log" class="page-section">
+          <div class="page-grid page-grid--single">
+            <section class="panel panel--trace">
+              <div class="panel__header">
+                <div>
+                  <div class="panel__kicker">Trace</div>
+                  <h3 class="panel__title">最近结果</h3>
+                </div>
+              </div>
+              <pre id="action-log" class="console-block console-block--tall"></pre>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

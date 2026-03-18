@@ -1,0 +1,19 @@
+{
+  "name": "easyconnect-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/renderer/tailwind.css -o ./src/renderer/styles.css --minify",
+    "start": "npm run build:css && electron .",
+    "dev": "npm run build:css && electron ."
+  },
+  "dependencies": {
+    "electron": "^35.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.2.1",
+    "tailwindcss": "^4.2.1"
+  }
+}
