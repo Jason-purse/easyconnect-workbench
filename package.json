@@ -1,0 +1,35 @@
+{
+  "name": "easyconnect-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "test": "node --check src/main.js && node --test test/app-tray-state.test.mjs test/bridge-boundary.test.mjs test/config-store.test.mjs test/easyconnect-bridge-runtime.test.mjs test/official-ui-state.test.mjs test/vpn-autostart.test.mjs test/vpn-config-hints.test.mjs test/vpn-display.test.mjs test/vpn-gateway-pool.test.mjs test/vpn-render-config.test.mjs test/vpn-maintainer.test.mjs test/vpn-official-ui-repair-smoke.test.mjs test/vpn-service.test.mjs test/vpn-smoke-summary.test.mjs test/vpn-status-labels.test.mjs",
+    "build:css": "tailwindcss -i ./src/renderer/tailwind.css -o ./src/renderer/styles.css --minify",
+    "smoke:vpn-autostart": "electron . --smoke-vpn-autostart --smoke-timeout-ms=120000",
+    "smoke:vpn-keepalive": "electron . --smoke-vpn-keepalive --smoke-interval-seconds=10 --smoke-timeout-ms=180000",
+    "smoke:vpn-offline-recovery": "electron . --smoke-vpn-offline-recovery --smoke-interval-seconds=10 --smoke-timeout-ms=180000",
+    "smoke:vpn-failure-state": "electron . --smoke-vpn-failure-state --smoke-interval-seconds=10 --smoke-timeout-ms=180000",
+    "smoke:official-ui-repair": "electron . --smoke-official-ui-repair --smoke-timeout-ms=120000",
+    "smoke:app-lifecycle": "electron . --smoke-app-lifecycle",
+    "smoke:app-hidden-start": "electron . --smoke-app-hidden-start",
+    "package:mac": "npm run build:css && node scripts/package-macos.mjs",
+    "smoke:packaged-app-lifecycle": "\"./dist.noindex/EasyConnect Workbench.app/Contents/MacOS/EasyConnect Workbench\" --smoke-app-lifecycle",
+    "smoke:packaged-app-hidden-start": "\"./dist.noindex/EasyConnect Workbench.app/Contents/MacOS/EasyConnect Workbench\" --smoke-app-hidden-start",
+    "smoke:packaged-vpn-autostart": "\"./dist.noindex/EasyConnect Workbench.app/Contents/MacOS/EasyConnect Workbench\" --smoke-vpn-autostart --smoke-timeout-ms=120000",
+    "smoke:packaged-vpn-offline-recovery": "\"./dist.noindex/EasyConnect Workbench.app/Contents/MacOS/EasyConnect Workbench\" --smoke-vpn-offline-recovery --smoke-interval-seconds=10 --smoke-timeout-ms=180000",
+    "smoke:packaged-vpn-failure-state": "\"./dist.noindex/EasyConnect Workbench.app/Contents/MacOS/EasyConnect Workbench\" --smoke-vpn-failure-state --smoke-interval-seconds=10 --smoke-timeout-ms=180000",
+    "smoke:packaged-official-ui-repair": "\"./dist.noindex/EasyConnect Workbench.app/Contents/MacOS/EasyConnect Workbench\" --smoke-official-ui-repair --smoke-timeout-ms=120000",
+    "verify:mvp-installed": "node scripts/verify-mvp-installed.mjs",
+    "start": "npm run build:css && electron .",
+    "dev": "npm run build:css && electron ."
+  },
+  "dependencies": {
+    "electron": "^35.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.2.1",
+    "tailwindcss": "^4.2.1"
+  }
+}

@@ -1,0 +1,289 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { describeMaintainerEvent, extractStatusFromRecoverResult } from "../src/services/vpn-status-labels.js";
+
+test("describeMaintainerEvent summarizes already-online cycles", () => {
+  const summary = describeMaintainerEvent({
+    ok: true,
+    result: {
+      action: "already-online",
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: "保持在线",
+    detail: "VPN 已在线，本轮仅完成探活。",
+    variant: "ok",
+  });
+});
+
+test("describeMaintainerEvent reports automatic official UI repair", () => {
+  const summary = describeMaintainerEvent({
+    ok: true,
+    result: {
+      action: "already-online",
+      officialUiRepair: {
+        action: "repair-official-ui",
+      },
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: "保持在线，官方界面已修复",
+    detail: "VPN 已在线，本轮探活后已把官方窗口拉回服务页。",
+    variant: "ok",
+  });
+});
+
+test("describeMaintainerEvent keeps VPN online when official UI repair fails", () => {
+  const summary = describeMaintainerEvent({
+    ok: true,
+    result: {
+      action: "already-online",
+      officialUiRepair: {
+        action: "repair-error",
+        error: "DevTools target is unreachable",
+      },
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: "保持在线，官方界面待修复",
+    detail: "VPN 已在线，但官方窗口自愈失败：DevTools target is unreachable",
+    variant: "warn",
+  });
+});
+
+test("describeMaintainerEvent summarizes main-path relogin", () => {
+  const summary = describeMaintainerEvent({
+    ok: true,
+    result: {
+      action: "relogin-page-bridge",
+      gatewayAttempts: [
+        { gateway: "203.0.113.10:9000", ok: false, error: "gateway 9000 offline" },
+        { gateway: "198.51.100.20:9898", ok: true },
+      ],
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: "主链路恢复成功",
+    detail: "已通过服务端登录、cookie 注入和官方页面桥接恢复 VPN。本轮尝试：203.0.113.10:9000 失败，198.51.100.20:9898 成功。",
+    variant: "ok",
+  });
+});
+
+test("describeMaintainerEvent summarizes fallback portal recovery", () => {
+  const summary = describeMaintainerEvent({
+    ok: true,
+    result: {
+      mode: "fallback-portal-debug",
+      error: "Gateway requires captcha; automatic password login is blocked",
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: "兜底恢复成功",
+    detail: "主链路失败后已回退到 portal 调试登录。",
+    variant: "warn",
+  });
+});
+
+test("describeMaintainerEvent summarizes fallback page-bridge recovery", () => {
+  const summary = describeMaintainerEvent({
+    ok: true,
+    result: {
+      mode: "fallback-page-bridge",
+      gatewayAttempts: [
+        { gateway: "203.0.113.10:9898", ok: false, error: "DoXmlConfigure(1) failed" },
+      ],
+    },
+  });
+
+  assert.deepEqual(summary, {
+    title: "桥接恢复成功",
+    detail: "主链路失败后已回退到官方页面桥接恢复。本轮尝试：203.0.113.10:9898 失败。",
+    variant: "warn",
+  });
+});
+
+test("describeMaintainerEvent classifies captcha-style failures", () => {
+  const summary = describeMaintainerEvent({
+    ok: false,
+    error: "Gateway requires captcha; automatic password login is blocked",
+    gatewayAttempts: [{ gateway: "203.0.113.10:9898", ok: false, error: "Gateway requires captcha; automatic password login is blocked" }],
+  });
+
+  assert.deepEqual(summary, {
+    title: "需要人工校验",
+    detail: "当前网关要求验证码或额外校验，自动恢复已暂停。本轮尝试：203.0.113.10:9898 失败。",
+    variant: "warn",
+  });
+});
+
+test("describeMaintainerEvent classifies missing-gateway failures", () => {
+  const summary = describeMaintainerEvent({
+    ok: false,
+    error: "No gateway available for recoverAndLogin",
+  });
+
+  assert.deepEqual(summary, {
+    title: "缺少可用网关",
+    detail: "当前没有可恢复的 VPN 网关，请先刷新状态或补充网关列表。",
+    variant: "error",
+  });
+});
+
+test("describeMaintainerEvent classifies local EasyConnect service readiness failures", () => {
+  const summary = describeMaintainerEvent({
+    ok: false,
+    error: "Local service did not become ready before online status timeout",
+    code: "EASYCONNECT_LOCAL_SERVICE_NOT_READY",
+    gatewayAttempts: [
+      {
+        gateway: "198.51.100.20:9898",
+        ok: false,
+        code: "EASYCONNECT_LOCAL_SERVICE_NOT_READY",
+        error: "Local service did not become ready before online status timeout",
+      },
+    ],
+  });
+
+  assert.deepEqual(summary, {
+    title: "EasyConnect 本地服务未就绪",
+    detail: "账号和网关登录链路已触发，但本机 EasyConnect 核心服务没有 ready；守护已降低重试频率，避免反复把官方界面拉回登录循环。本轮尝试：198.51.100.20:9898 失败。",
+    variant: "warn",
+  });
+});
+
+test("describeMaintainerEvent classifies agent proxy readiness failures", () => {
+  const summary = describeMaintainerEvent({
+    ok: false,
+    error: "ECAgentProxy did not become ready before continuing EasyConnect recovery",
+    code: "EASYCONNECT_AGENT_PROXY_NOT_READY",
+    gatewayAttempts: [
+      {
+        gateway: "198.51.100.20:9898",
+        ok: false,
+        code: "EASYCONNECT_AGENT_PROXY_NOT_READY",
+        error: "ECAgentProxy did not become ready before continuing EasyConnect recovery",
+      },
+    ],
+  });
+
+  assert.deepEqual(summary, {
+    title: "EasyConnect 代理未就绪",
+    detail: "ECAgentProxy 还没有 ready，守护已暂停本轮恢复并降低重试频率，避免继续拉起官方客户端进入严重错误。本轮尝试：198.51.100.20:9898 失败。",
+    variant: "warn",
+  });
+});
+
+test("describeMaintainerEvent classifies same-user private kick failures", () => {
+  const summary = describeMaintainerEvent({
+    ok: false,
+    error: "EasyConnect logout detected: private same username login",
+    code: "EASYCONNECT_PRIVATE_KICK",
+    gatewayAttempts: [
+      {
+        gateway: "198.51.100.20:9898",
+        ok: false,
+        code: "EASYCONNECT_PRIVATE_KICK",
+        error: "EasyConnect logout detected: private same username login",
+      },
+    ],
+  });
+
+  assert.deepEqual(summary, {
+    title: "账号被其他端踢下线",
+    detail: "EasyConnect 报告同用户名登录，守护已降低重试频率，避免当前机器和其他终端互相抢登录。本轮尝试：198.51.100.20:9898 失败。",
+    variant: "warn",
+  });
+});
+
+test("describeMaintainerEvent classifies all-gateway failures as offline", () => {
+  const summary = describeMaintainerEvent({
+    ok: false,
+    error: "VpnMaintainer could not recover any gateway",
+    gatewayAttempts: [
+      { gateway: "203.0.113.10:9898", ok: false, error: "connect ECONNREFUSED" },
+      { gateway: "198.51.100.20:9898", ok: false, error: "connect ETIMEDOUT" },
+    ],
+  });
+
+  assert.deepEqual(summary, {
+    title: "VPN 离线 / 网关不可达",
+    detail: "两个已配置网关都恢复失败，请检查网络、网关地址或 EasyConnect 服务端状态。本轮尝试：203.0.113.10:9898 失败，198.51.100.20:9898 失败。",
+    variant: "error",
+  });
+});
+
+test("extractStatusFromRecoverResult returns the direct main-path status payload", () => {
+  const status = extractStatusFromRecoverResult({
+    action: "relogin-page-bridge",
+    activeSession: {
+      sessionId: "session-1",
+    },
+    loginStatus: {
+      status: "1",
+    },
+  });
+
+  assert.deepEqual(status, {
+    action: "relogin-page-bridge",
+    activeSession: {
+      sessionId: "session-1",
+    },
+    loginStatus: {
+      status: "1",
+    },
+  });
+});
+
+test("extractStatusFromRecoverResult unwraps fallback portal results to the online payload", () => {
+  const status = extractStatusFromRecoverResult({
+    mode: "fallback-portal-debug",
+    gateway: {
+      host: "203.0.113.10",
+      port: 9898,
+    },
+    error: "Gateway requires captcha; automatic password login is blocked",
+    gatewayAttempts: [
+      {
+        gateway: "203.0.113.10:9898",
+        ok: false,
+        error: "Gateway requires captcha; automatic password login is blocked",
+      },
+    ],
+    online: {
+      activeSession: {
+        sessionId: "session-2",
+      },
+      loginStatus: {
+        status: "1",
+      },
+    },
+  });
+
+  assert.deepEqual(status, {
+    mode: "fallback-portal-debug",
+    gateway: {
+      host: "203.0.113.10",
+      port: 9898,
+    },
+    error: "Gateway requires captcha; automatic password login is blocked",
+    gatewayAttempts: [
+      {
+        gateway: "203.0.113.10:9898",
+        ok: false,
+        error: "Gateway requires captcha; automatic password login is blocked",
+      },
+    ],
+    activeSession: {
+      sessionId: "session-2",
+    },
+    loginStatus: {
+      status: "1",
+    },
+  });
+});

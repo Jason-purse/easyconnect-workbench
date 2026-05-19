@@ -1,0 +1,17 @@
+node_modules/
+.worktrees/
+dist/
+dist.noindex/
+.DS_Store
+.env
+.env.*
+*.log
+*.jsonl
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+config.json
+*.local.json
+docs/project-brief/
+workbench-redesign-*.html
