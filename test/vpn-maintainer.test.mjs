@@ -222,6 +222,85 @@ test("VpnMaintainer forwards the verified online status into official UI repair"
   await manager.stop();
 });
 
+test("VpnMaintainer forwards nested recovery online status into official UI repair", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+
+  if (!VpnMaintainer) {
+    assert.fail("VpnMaintainer is missing");
+  }
+
+  let finishLoop = null;
+  const repairCalls = [];
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => ({
+      action: "relogin-page-bridge",
+      recovery: {
+        mode: "reuse-existing-main-app",
+      },
+      online: {
+        activeSession: {
+          sessionId: "recovered-session",
+          token: "secret-session-token",
+        },
+        loginStatus: {
+          status: "1",
+        },
+        serviceState: {
+          base: "18",
+          l3vpn: "18",
+          tcp: "43",
+        },
+      },
+    }),
+    repairOfficialUiFn: async (config, options) => {
+      repairCalls.push({
+        knownOnlineStatus: options.knownOnlineStatus,
+        lastKnownGateway: config.vpn.lastKnownGateway,
+      });
+      return {
+        action: "already-consistent",
+      };
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle }) => {
+      const result = await ensureOnlineFn({});
+      await onCycle({
+        ok: true,
+        result,
+      });
+      return new Promise((resolve) => {
+        finishLoop = resolve;
+      });
+    },
+  });
+
+  await manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(repairCalls.length, 1);
+  assert.deepEqual(repairCalls[0].lastKnownGateway, { host: "198.51.100.20", port: 9898 });
+  assert.equal(repairCalls[0].knownOnlineStatus.action, undefined);
+  assert.equal(repairCalls[0].knownOnlineStatus.recovery, undefined);
+  assert.equal(repairCalls[0].knownOnlineStatus.loginStatus.status, "1");
+  assert.equal(repairCalls[0].knownOnlineStatus.activeSession.sessionId, "recovered-session");
+  assert.equal(repairCalls[0].knownOnlineStatus.activeSession.token, undefined);
+
+  finishLoop();
+  await manager.stop();
+});
+
 test("VpnMaintainer throttles repeated official UI repair for stable already-online cycles", async () => {
   const { VpnMaintainer } = await loadVpnMaintainer();
 

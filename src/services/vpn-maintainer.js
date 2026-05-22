@@ -195,7 +195,7 @@ export class VpnMaintainer {
     const cooldownMs = getOfficialUiRepairCooldownMs(config);
     const online = getResultOnline(onlineResult);
     const sessionId = online?.activeSession?.sessionId ?? null;
-    const lastRepairIsReusable = ["already-consistent", "repair-official-ui"].includes(this.lastOfficialUiRepair?.action);
+    const lastRepairIsReusable = this.lastOfficialUiRepair?.action === "already-consistent";
     const canSkipStableOnlineRepair =
       onlineResult?.action === "already-online" &&
       lastRepairIsReusable &&
@@ -214,7 +214,7 @@ export class VpnMaintainer {
     try {
       const repair = await this.repairOfficialUiFn(withLastKnownGateway(config, gateway), {
         remoteDebugPort: getRemoteDebugPort(config),
-        knownOnlineStatus: sanitizeResult(onlineResult),
+        knownOnlineStatus: sanitizeResult(online),
       });
 
       if (["already-consistent", "repair-official-ui"].includes(repair?.action)) {
