@@ -63,10 +63,112 @@ test("VpnService.getSnapshot reuses one runtime and returns combined status/info
 
   assert.equal(snapshot.status.activeSession.token, undefined);
   assert.equal(snapshot.environmentInfo.activeSession.token, undefined);
-  assert.equal(snapshot.environmentInfo.latestCachedToken.token, undefined);
   assert.deepEqual(snapshot.status.loginStatus, { status: "1" });
+  assert.equal(snapshot.environmentInfo.latestCachedToken, null);
   assert.deepEqual(snapshot.environmentInfo.gatewayCandidates, [{ host: "203.0.113.10", port: 9898 }]);
   assert.equal(calls.filter((item) => item === "describeActiveSession").length, 1);
+  assert.equal(calls.includes("describeLatestCachedToken"), false);
+});
+
+test("VpnService.getSnapshot reports latest cached token only when no active session exists", async () => {
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return null;
+    },
+    async describeLatestCachedToken() {
+      return {
+        token: "cached-token",
+        tokenRedacted: "cached...oken",
+        loginStatus: { status: "1" },
+      };
+    },
+    async getBundleSettingPath() {
+      return "/Applications/EasyConnect.app/Contents/Resources/conf/setting_demo.json";
+    },
+    async getPort() {
+      return 54530;
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+  });
+
+  const snapshot = await service.getSnapshot(
+    {
+      vpn: {
+        appExecutable: fakeRuntime.appExecutable,
+      },
+    },
+    { includeOfficialUi: false },
+  );
+
+  assert.deepEqual(snapshot.status.latestCachedToken, {
+    token: undefined,
+    tokenRedacted: "cached...oken",
+    loginStatus: { status: "1" },
+  });
+  assert.deepEqual(snapshot.environmentInfo.latestCachedToken, {
+    token: undefined,
+    tokenRedacted: "cached...oken",
+    loginStatus: { status: "1" },
+  });
+});
+
+test("VpnService.getSnapshot keeps online status when local runtime info is temporarily unavailable", async () => {
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return {
+        token: "secret-token",
+        sessionId: "session-1",
+      };
+    },
+    async getLoginStatus() {
+      return { status: "1" };
+    },
+    async getServiceState() {
+      return { base: "18", l3vpn: "18", tcp: "43" };
+    },
+    async getLocalRuntimeInfo() {
+      throw new Error("Failed to get local runtime info: empty response");
+    },
+    async getBundleSettingPath() {
+      return "/Applications/EasyConnect.app/Contents/Resources/conf/setting_demo.json";
+    },
+    async getPort() {
+      return 54530;
+    },
+    async describeLatestCachedToken() {
+      return {};
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+  });
+
+  const snapshot = await service.getSnapshot(
+    {
+      vpn: {
+        appExecutable: fakeRuntime.appExecutable,
+      },
+    },
+    { includeOfficialUi: false },
+  );
+
+  assert.deepEqual(snapshot.status.loginStatus, { status: "1" });
+  assert.deepEqual(snapshot.status.serviceState, { base: "18", l3vpn: "18", tcp: "43" });
+  assert.match(snapshot.status.localRuntimeInfo.error, /local runtime info/i);
 });
 
 test("VpnService.getSnapshot includes official UI target state without raw page text", async () => {
@@ -145,7 +247,7 @@ test("VpnService.getSnapshot includes official UI target state without raw page 
   assert.equal(JSON.stringify(snapshot.status.officialUi).includes("账号 demo-user"), false);
 });
 
-test("VpnService.repairOfficialUi restores a blocked official window without logging in again", async () => {
+test("VpnService.repairOfficialUi does not mutate a visible gateway probe page while VPN is online", async () => {
   const calls = [];
   const fakeRuntime = {
     async describeActiveSession() {
@@ -249,6 +351,10 @@ test("VpnService.repairOfficialUi restores a blocked official window without log
       calls.push(["reloadPortalTarget", targetUrlPart, options.remoteDebugPort]);
       return { ok: true, href: "https://198.51.100.20:9898/portal/#!/service" };
     },
+    async navigateRemoteDebugTarget(targetUrlPart, targetUrl, options) {
+      calls.push(["navigateRemoteDebugTarget", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      return { ok: true, requestedUrl: targetUrl };
+    },
     appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
   };
 
@@ -271,17 +377,248 @@ test("VpnService.repairOfficialUi restores a blocked official window without log
     },
   });
 
-  assert.equal(result.action, "repair-official-ui");
-  assert.deepEqual(result.gateway, { host: "198.51.100.20", port: 9898 });
-  assert.equal(result.bridge.token, undefined);
+  assert.equal(result.action, "already-consistent");
   assert.deepEqual(calls.filter((call) => Array.isArray(call)), [
-    ["navigatePortalRoute", "/local/connect/connect.html", "https://198.51.100.20:9898/portal/#!/service", 9222],
-    ["waitForRemoteDebugTarget", "/portal/#!/service", 9222],
-    ["syncPortalGlobalState", "/portal/#!/service", "session-1", "198.51.100.20", 9898, "service"],
-    ["bootstrapViaPageBridge", "/portal/#!/service", "session-1", 9222],
-    ["reloadPortalTarget", "/portal/#!/service", 9222],
-    ["waitForRemoteDebugTarget", "/portal/#!/service", 9222],
   ]);
+});
+
+test("VpnService.repairOfficialUi repairs failed targets and leaves status or duplicate service targets alone", async () => {
+  const calls = [];
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return {
+        token: "secret-token",
+        sessionId: "session-1",
+      };
+    },
+    async getLoginStatus() {
+      return { status: "1" };
+    },
+    async getServiceState() {
+      return { base: "18", l3vpn: "18", tcp: "43" };
+    },
+    async getLocalRuntimeInfo() {
+      return { enableAutoLogin: 0 };
+    },
+    async getRemoteDebugTargets() {
+      return [
+        {
+          id: "notfound-target",
+          type: "page",
+          title: "EasyConnect",
+          url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html?from=https%3A%2F%2F198.51.100.20%3A9898%2Fportal%2F%23!%2Fservice",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/notfound-target",
+        },
+        {
+          id: "status-target",
+          type: "page",
+          title: "EasyConnect",
+          url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/vpn_status_manager/vpn_status_manager.html",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/status-target",
+        },
+        {
+          id: "service-a",
+          type: "page",
+          title: "EasyConnect",
+          url: "https://198.51.100.20:9898/portal/#!/service",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/service-a",
+        },
+        {
+          id: "service-b",
+          type: "page",
+          title: "EasyConnect",
+          url: "https://198.51.100.20:9898/portal/#!/service",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/service-b",
+        },
+      ];
+    },
+    async evaluateOnRemoteDebugPageTarget(target) {
+      const visible = target.id === "notfound-target";
+      const bodyText = target.id === "notfound-target" ? "连接失败 请尝试刷新后重试" : "资源搜索 默认资源组";
+      return {
+        evaluation: {
+          result: {
+            value: {
+              href: target.url,
+              title: target.title,
+              visibilityState: visible ? "visible" : "hidden",
+              hidden: !visible,
+              bodyText,
+            },
+          },
+        },
+      };
+    },
+    async getBundleSettingPath() {
+      return "/Applications/EasyConnect.app/Contents/Resources/conf/setting_demo.json";
+    },
+    async getPort() {
+      return 54530;
+    },
+    async describeLatestCachedToken() {
+      return {};
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    async navigatePortalRoute(targetUrlPart, targetUrl, options) {
+      calls.push(["navigatePortalRoute", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      return { ok: true, href: targetUrl };
+    },
+    async waitForRemoteDebugTarget(targetUrlPart, options) {
+      calls.push(["waitForRemoteDebugTarget", targetUrlPart, options.remoteDebugPort]);
+      return { id: "service-a", url: "https://198.51.100.20:9898/portal/#!/service" };
+    },
+    async syncPortalGlobalState(targetUrlPart, context, options) {
+      calls.push(["syncPortalGlobalState", targetUrlPart, context.sessionId, context.gatewayHost, context.gatewayPort, options.profile]);
+      return { ok: true };
+    },
+    async bootstrapViaPageBridge(targetUrlPart, context, options) {
+      calls.push(["bootstrapViaPageBridge", targetUrlPart, context.sessionId, options.remoteDebugPort]);
+      return { ok: true, token: "derived-token" };
+    },
+    async reloadPortalTarget(targetUrlPart, options) {
+      calls.push(["reloadPortalTarget", targetUrlPart, options.remoteDebugPort]);
+      return { ok: true, href: "https://198.51.100.20:9898/portal/#!/service" };
+    },
+    async navigateRemoteDebugTarget(targetUrlPart, targetUrl, options) {
+      calls.push(["navigateRemoteDebugTarget", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      return { ok: true, requestedUrl: targetUrl };
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+  });
+
+  const result = await service.repairOfficialUi({
+    vpn: {
+      username: "demo-user",
+      remoteDebugPort: 9222,
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+    },
+  });
+
+  assert.equal(result.action, "repair-official-ui");
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigatePortalRoute"), []);
+  assert.deepEqual(
+    calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget").map((call) => call[1]),
+    [
+      "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html?from=https%3A%2F%2F198.51.100.20%3A9898%2Fportal%2F%23!%2Fservice",
+    ],
+  );
+  assert.deepEqual(result.repairedResidualTargets.map((target) => [target.id, target.kind]), [
+    ["notfound-target", "probe-failed"],
+  ]);
+});
+
+test("VpnService.repairOfficialUi treats status windows as consistent when the tunnel has a service target", async () => {
+  const calls = [];
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return {
+        token: "secret-token",
+        sessionId: "session-1",
+      };
+    },
+    async getLoginStatus() {
+      return { status: "1" };
+    },
+    async getServiceState() {
+      return { base: "18", l3vpn: "18", tcp: "43" };
+    },
+    async getLocalRuntimeInfo() {
+      return { enableAutoLogin: 0 };
+    },
+    async getRemoteDebugTargets() {
+      return [
+        {
+          id: "service-target",
+          type: "page",
+          title: "EasyConnect",
+          url: "https://198.51.100.20:9898/portal/#!/service",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/service-target",
+        },
+        {
+          id: "status-target",
+          type: "page",
+          title: "EasyConnect",
+          url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/vpn_status_manager/vpn_status_manager.html",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/status-target",
+        },
+      ];
+    },
+    async evaluateOnRemoteDebugPageTarget(target) {
+      return {
+        evaluation: {
+          result: {
+            value: {
+              href: target.url,
+              title: target.title,
+              visibilityState: target.id === "status-target" ? "visible" : "hidden",
+              hidden: target.id !== "status-target",
+              bodyText: target.id === "service-target" ? "资源搜索 默认资源组" : "",
+            },
+          },
+        },
+      };
+    },
+    async getBundleSettingPath() {
+      return "/Applications/EasyConnect.app/Contents/Resources/conf/setting_demo.json";
+    },
+    async getPort() {
+      return 54530;
+    },
+    async describeLatestCachedToken() {
+      return {};
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    async navigatePortalRoute(targetUrlPart, targetUrl, options) {
+      calls.push(["navigatePortalRoute", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      return { ok: true, href: targetUrl };
+    },
+    async waitForRemoteDebugTarget(targetUrlPart, options) {
+      calls.push(["waitForRemoteDebugTarget", targetUrlPart, options.remoteDebugPort]);
+      return { id: "service-target", url: "https://198.51.100.20:9898/portal/#!/service" };
+    },
+    async syncPortalGlobalState(targetUrlPart, context, options) {
+      calls.push(["syncPortalGlobalState", targetUrlPart, context.sessionId, context.gatewayHost, context.gatewayPort, options.profile]);
+      return { ok: true };
+    },
+    async bootstrapViaPageBridge(targetUrlPart, context, options) {
+      calls.push(["bootstrapViaPageBridge", targetUrlPart, context.sessionId, options.remoteDebugPort]);
+      return { ok: true, token: "derived-token" };
+    },
+    async reloadPortalTarget(targetUrlPart, options) {
+      calls.push(["reloadPortalTarget", targetUrlPart, options.remoteDebugPort]);
+      return { ok: true, href: "https://198.51.100.20:9898/portal/#!/service" };
+    },
+    async navigateRemoteDebugTarget(targetUrlPart, targetUrl, options) {
+      calls.push(["navigateRemoteDebugTarget", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      return { ok: true, requestedUrl: targetUrl };
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+  });
+
+  const result = await service.repairOfficialUi({
+    vpn: {
+      username: "demo-user",
+      remoteDebugPort: 9222,
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+    },
+  });
+
+  assert.equal(result.action, "already-consistent");
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget"), []);
 });
 
 test("VpnService.repairOfficialUi can reuse a verified online status when the fresh snapshot lags", async () => {
@@ -380,6 +717,10 @@ test("VpnService.repairOfficialUi can reuse a verified online status when the fr
       calls.push(["reloadPortalTarget", targetUrlPart, options.remoteDebugPort]);
       return { ok: true, href: "https://198.51.100.20:9898/portal/#!/service" };
     },
+    async navigateRemoteDebugTarget(targetUrlPart, targetUrl, options) {
+      calls.push(["navigateRemoteDebugTarget", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      return { ok: true, requestedUrl: targetUrl };
+    },
     appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
   };
 
@@ -420,16 +761,8 @@ test("VpnService.repairOfficialUi can reuse a verified online status when the fr
     },
   );
 
-  assert.equal(result.action, "repair-official-ui");
-  assert.deepEqual(result.gateway, { host: "198.51.100.20", port: 9898 });
-  assert.equal(result.bridge.token, undefined);
+  assert.equal(result.action, "already-consistent");
   assert.deepEqual(calls.filter((call) => Array.isArray(call)), [
-    ["navigatePortalRoute", "/local/connect/connect.html", "https://198.51.100.20:9898/portal/#!/service", 9222],
-    ["waitForRemoteDebugTarget", "/portal/#!/service", 9222],
-    ["syncPortalGlobalState", "/portal/#!/service", "session-1", "198.51.100.20", 9898, "service"],
-    ["bootstrapViaPageBridge", "/portal/#!/service", "session-1", 9222],
-    ["reloadPortalTarget", "/portal/#!/service", 9222],
-    ["waitForRemoteDebugTarget", "/portal/#!/service", 9222],
   ]);
 });
 

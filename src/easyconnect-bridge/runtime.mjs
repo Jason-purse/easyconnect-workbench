@@ -19,6 +19,8 @@ const LOGS_DIR = path.join(HOME, "Library", "Logs", "EasyConnect");
 const LOCAL_SERVICE_SOCKET_NAMES = ["ECDomainFile", "ECRSESSIONSOCKFILE"];
 const AGENT_PROXY_LABEL = "com.sangfor.ECAgentProxy";
 const AGENT_PROXY_PLIST = "/Library/LaunchAgents/com.sangfor.ECAgentProxy.plist";
+const CACHE_SCAN_ENTRY_LIMIT = 2000;
+const OFFICIAL_CRASH_DIAGNOSTIC_FRESH_MS = 10 * 60 * 1000;
 
 function getBundleConfDir(appExecutable) {
   return path.join(path.dirname(path.dirname(appExecutable)), "Resources", "conf");
@@ -48,9 +50,9 @@ function redactToken(token) {
   return `${token.slice(0, 6)}...${token.slice(-4)}`;
 }
 
-async function exists(filePath) {
+async function exists(filePath, fsOps = fs) {
   try {
-    await fs.access(filePath);
+    await fsOps.access(filePath);
     return true;
   } catch {
     return false;
@@ -69,30 +71,47 @@ async function writeJsonAtomic(filePath, value) {
 }
 
 async function listFilesByMtime(dirPath, limit = 40, fsOps = fs) {
-  const names = await fsOps.readdir(dirPath);
+  const dir = await fsOps.opendir(dirPath);
   const files = [];
+  let inspected = 0;
 
-  for (const name of names) {
-    const filePath = path.join(dirPath, name);
-    let stat;
-    try {
-      stat = await fsOps.stat(filePath);
-    } catch (error) {
-      if (error?.code === "ENOENT") {
+  try {
+    for await (const entry of dir) {
+      if (!entry.isFile()) {
         continue;
       }
-      throw error;
-    }
-    if (stat.isFile()) {
+
+      inspected += 1;
+      const filePath = path.join(dirPath, entry.name);
+      let stat;
+      try {
+        stat = await fsOps.stat(filePath);
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          continue;
+        }
+        throw error;
+      }
+
       files.push({ filePath, mtimeMs: stat.mtimeMs });
+      files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      if (files.length > limit) {
+        files.length = limit;
+      }
+
+      if (inspected >= CACHE_SCAN_ENTRY_LIMIT) {
+        break;
+      }
     }
+  } finally {
+    await dir.close().catch(() => {});
   }
 
-  return files.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit);
+  return files;
 }
 
 async function extractTokensFromCacheFromDir(dirPath, limit = 40, fsOps = fs) {
-  if (!(await exists(dirPath))) {
+  if (!(await exists(dirPath, fsOps))) {
     return [];
   }
 
@@ -629,6 +648,8 @@ function buildPortalOfficialAuthStateExpression() {
       const vm = vmodels && vmodels.password;
       return {
         href: location.href,
+        title: document.title,
+        readyState: document.readyState,
         hasSF: !!window.SF,
         hasAuth: !!(window.SF && SF.auth && typeof SF.auth.getLoginConfig === "function" && typeof SF.auth.authPsw === "function"),
         hasSFAPI: !!(window.SFAPI && typeof SFAPI.getPswConfig === "function" && typeof SFAPI.loginPsw === "function"),
@@ -643,6 +664,43 @@ function buildPortalOfficialAuthStateExpression() {
         twfIDLength: readTwfID()
       };
     })()`;
+}
+
+function isPortalLoginAuthBridgeReady(probe = {}, targetUrlPart = "/portal/#!/login") {
+  const href = `${probe?.href ?? ""}`;
+  const title = `${probe?.title ?? ""}`;
+
+  return (
+    href.includes(targetUrlPart) &&
+    !/^Loading\.\.\.$/i.test(title.trim()) &&
+    probe?.hasAuth === true &&
+    probe?.hasSFAPI === true &&
+    probe?.hasSetting === true &&
+    probe?.hasSession === true
+  );
+}
+
+function isBrokenRemoteDebugPageTarget(target = {}) {
+  const url = `${target?.url ?? ""}`;
+  const title = `${target?.title ?? ""}`.trim();
+
+  return (
+    /^Loading\.\.\.$/i.test(title) ||
+    url.includes("/local/connect_notfound/connect_notfound.html") ||
+    url.includes("/local/vpn_logout_passive/") ||
+    url.includes("/local/local_exception/") ||
+    url.includes("/local/error/")
+  );
+}
+
+function isReusableRemoteDebugPageTargetCandidate(target = {}) {
+  const url = `${target?.url ?? ""}`;
+
+  return (
+    url.includes("/portal/#!/service") ||
+    url.includes("/portal/#!/login") ||
+    url.includes("/portal/#!/user_setting_box")
+  );
 }
 
 function buildPortalOfficialPasswordLoginExpression(username, password, captcha = "") {
@@ -1177,8 +1235,20 @@ function buildContainerConfigReadExpression(key) {
     }))()`;
 }
 
+function normalizeContainerWriteValue(value, fallback = "") {
+  return value === undefined ? fallback : value;
+}
+
+function normalizeContainerRuntimeWriteSpec(writeSpec) {
+  const [keyPath, value, persist = 0] = writeSpec;
+  return [keyPath, normalizeContainerWriteValue(value), persist];
+}
+
 function buildContainerConfigWriteExpression(key, value, options = {}) {
-  const serializedValue = typeof value === "string" ? value : JSON.stringify(value);
+  const normalizedValue = normalizeContainerWriteValue(value);
+  const serializedValue = typeof normalizedValue === "string"
+    ? normalizedValue
+    : JSON.stringify(normalizedValue);
   const awaitCallback = options.awaitCallback ?? true;
 
   if (!awaitCallback) {
@@ -1226,13 +1296,14 @@ function buildContainerRuntimeReadExpression(keyPath) {
 }
 
 function buildContainerRuntimeWriteExpression(keyPath, value, persist = 0) {
+  const normalizedValue = normalizeContainerWriteValue(value);
   return `(() => {
       if (typeof window.ecSet !== "function") {
         return { ok: false, reason: "ecSet missing", keyPath: ${JSON.stringify(keyPath)} };
       }
       let result = null;
       try {
-        result = window.ecSet(${JSON.stringify(keyPath)}, ${JSON.stringify(value)}, ${persist});
+        result = window.ecSet(${JSON.stringify(keyPath)}, ${JSON.stringify(normalizedValue)}, ${persist});
       } catch (error) {
         return { ok: false, keyPath: ${JSON.stringify(keyPath)}, error: String(error) };
       }
@@ -1241,11 +1312,16 @@ function buildContainerRuntimeWriteExpression(keyPath, value, persist = 0) {
 }
 
 function buildContainerRuntimeBatchWriteExpression(writeSpecs) {
+  const normalizedWriteSpecs = writeSpecs.map((entry) => ({
+    keyPath: entry.keyPath,
+    value: normalizeContainerWriteValue(entry.value),
+    persist: entry.persist ?? 0,
+  }));
   return `(() => {
       if (typeof window.ecSet !== "function") {
         return { ok: false, reason: "ecSet missing", writes: [] };
       }
-      const writes = ${JSON.stringify(writeSpecs)};
+      const writes = ${JSON.stringify(normalizedWriteSpecs)};
       const results = [];
       for (const entry of writes) {
         try {
@@ -1530,8 +1606,8 @@ function buildPortalGlobalWriteSpecs(context, options = {}) {
     token,
     vpnURL,
     runtimeWriteSpecs: allowedKeys
-      ? allSpecs.filter(([keyPath]) => allowedKeys.has(keyPath))
-      : allSpecs,
+      ? allSpecs.filter(([keyPath]) => allowedKeys.has(keyPath)).map(normalizeContainerRuntimeWriteSpec)
+      : allSpecs.map(normalizeContainerRuntimeWriteSpec),
   };
 }
 
@@ -1600,8 +1676,20 @@ async function readRecentLogLines(filePath, options = {}) {
 function classifyRecoveryDiagnostics(diagnostics = {}) {
   const lines = [
     ...(diagnostics.officialLogs?.csclient ?? []),
+    ...(diagnostics.officialLogs?.easyconnect ?? []),
     ...(diagnostics.officialLogs?.localServiceManager ?? []),
   ].join("\n");
+
+  if (
+    /crash_service run exception/i.test(lines) ||
+    /uncaughtException/i.test(lines) ||
+    /ERR_ASSERTION/i.test(lines) ||
+    /Assert\(typeof value!?=?"undefined"\)/i.test(lines) ||
+    /EasyConnect遇到严重错误/i.test(lines) ||
+    /onResizeWindow failed, winID is not exist/i.test(lines)
+  ) {
+    return "official-ui-crashed";
+  }
 
   if (
     /local service (CheckReady error|setup timeout)/i.test(lines) ||
@@ -1612,6 +1700,18 @@ function classifyRecoveryDiagnostics(diagnostics = {}) {
   }
 
   return "unknown";
+}
+
+function isOfficialUiCrashDiagnostics(diagnostics) {
+  if (diagnostics?.classification !== "official-ui-crashed") {
+    return false;
+  }
+
+  if (typeof diagnostics?.collectedAt !== "number") {
+    return true;
+  }
+
+  return Date.now() - diagnostics.collectedAt <= OFFICIAL_CRASH_DIAGNOSTIC_FRESH_MS;
 }
 
 function isLocalServiceNotReadyError(error) {
@@ -1720,6 +1820,23 @@ function createAgentProxyNotReadyError(finalState = null) {
   const error = new Error("ECAgentProxy did not become ready before continuing EasyConnect recovery");
   error.code = "EASYCONNECT_AGENT_PROXY_NOT_READY";
   error.finalState = finalState;
+  return error;
+}
+
+function createMainAppStillRunningError(processes = [], appExecutable = "") {
+  const error = new Error("EasyConnect main app did not exit before relaunch");
+  error.code = "EASYCONNECT_MAIN_APP_STILL_RUNNING";
+  error.appExecutable = appExecutable;
+  error.processes = processes;
+  return error;
+}
+
+function createMainAppAlreadyRunningWithoutDebugError(processes = [], remoteDebugPort = null, appExecutable = "") {
+  const error = new Error("EasyConnect is already running without a reusable remote-debug target");
+  error.code = "EASYCONNECT_MAIN_APP_ALREADY_RUNNING_WITHOUT_DEBUG";
+  error.appExecutable = appExecutable;
+  error.remoteDebugPort = remoteDebugPort;
+  error.processes = processes;
   return error;
 }
 
@@ -2429,12 +2546,16 @@ export class EasyConnectRuntime {
     return response.data;
   }
 
-  async launchMainAppFromEcAgent(sessionId) {
+  async launchMainAppFromEcAgent(sessionId, options = {}) {
     const token = EasyConnectRuntime.deriveToken(sessionId);
     const encodedTwfId = EasyConnectRuntime.encodeLaunchTwfId(sessionId);
+    const args = [];
 
-    await this.killMainAppProcesses();
-    const pid = launchDetached(this.appExecutable, [
+    if (options.remoteDebugPort) {
+      args.push(`--remote-debugging-port=${options.remoteDebugPort}`);
+    }
+
+    args.push(
       "--from",
       "ecagent",
       "--agentport",
@@ -2443,14 +2564,58 @@ export class EasyConnectRuntime {
       token,
       "--twfid",
       encodedTwfId,
-    ]);
+    );
+
+    const killed = await this.killMainAppProcesses();
+    const mainAppStopped = await this.waitForMainAppProcessesStopped({
+      timeoutMs: options.mainAppStopTimeoutMs ?? 10000,
+      pollMs: options.mainAppStopPollMs ?? 500,
+      signal: options.signal,
+    });
+    const pid = this.spawnMainApp(args);
 
     return {
       pid,
       token,
       tokenRedacted: redactToken(token),
       encodedTwfId,
+      remoteDebugPort: options.remoteDebugPort ?? null,
+      killed,
+      mainAppStopped,
     };
+  }
+
+  async listMainAppProcesses() {
+    const { stdout } = await execFileAsync("/bin/ps", ["-axo", "pid=,ppid=,command="], {
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    });
+    const processes = parseProcessList(stdout);
+    return filterProcessesByExecutable(processes, this.appExecutable);
+  }
+
+  async waitForMainAppProcessesStopped(options = {}) {
+    const timeoutMs = options.timeoutMs ?? 10000;
+    const pollMs = options.pollMs ?? 500;
+    const signal = options.signal;
+    const startedAt = Date.now();
+    let lastProcesses = [];
+
+    while (Date.now() - startedAt < timeoutMs) {
+      throwIfAborted(signal);
+      lastProcesses = await this.listMainAppProcesses();
+
+      if (lastProcesses.length === 0) {
+        return {
+          ok: true,
+          processes: [],
+        };
+      }
+
+      await sleep(pollMs, signal);
+    }
+
+    throw createMainAppStillRunningError(lastProcesses, this.appExecutable);
   }
 
   async killMainAppProcesses({ force = true } = {}) {
@@ -2633,16 +2798,83 @@ export class EasyConnectRuntime {
     throw error;
   }
 
+  spawnMainApp(args = []) {
+    return launchDetached(this.appExecutable, args);
+  }
+
   async launchMainAppUserMode(options = {}) {
     const remoteDebugPort = options.remoteDebugPort ?? null;
+    const forceKill = options.forceKill ?? true;
     const args = [];
 
     if (remoteDebugPort) {
       args.push(`--remote-debugging-port=${remoteDebugPort}`);
     }
 
-    const pid = launchDetached(this.appExecutable, args);
+    if (options.reuseExisting !== false) {
+      const reusedExistingMainApp = await this.findReusableRemoteDebugPageTarget({
+        remoteDebugPort,
+        timeoutMs: options.existingRemoteDebugTimeoutMs ?? 1200,
+        responsiveTimeoutMs: options.existingRemoteDebugResponsiveTimeoutMs ?? 1200,
+        signal: options.signal,
+      });
+
+      if (reusedExistingMainApp) {
+        return {
+          action: "reused-existing",
+          pid: null,
+          appExecutable: this.appExecutable,
+          remoteDebugPort,
+          args: [],
+          reusedExistingMainApp,
+        };
+      }
+    }
+
+    const existingProcesses = await this.listMainAppProcesses().catch(() => []);
+    if (existingProcesses.length > 0) {
+      if (options.failIfAlreadyRunning) {
+        throw createMainAppAlreadyRunningWithoutDebugError(
+          existingProcesses,
+          remoteDebugPort,
+          this.appExecutable,
+        );
+      }
+
+      if (options.restartExisting === false) {
+        return {
+          action: "already-running-without-debug",
+          pid: null,
+          appExecutable: this.appExecutable,
+          remoteDebugPort,
+          args: [],
+          existingProcesses,
+        };
+      }
+
+      const killed = await this.killMainAppProcesses({ force: forceKill });
+      const mainAppStopped = await this.waitForMainAppProcessesStopped({
+        timeoutMs: options.mainAppStopTimeoutMs ?? 10000,
+        pollMs: options.mainAppStopPollMs ?? 500,
+        signal: options.signal,
+      });
+      const pid = this.spawnMainApp(args);
+
+      return {
+        action: "restarted-existing-without-debug",
+        pid,
+        appExecutable: this.appExecutable,
+        remoteDebugPort,
+        args,
+        existingProcesses,
+        killed,
+        mainAppStopped,
+      };
+    }
+
+    const pid = this.spawnMainApp(args);
     return {
+      action: "launched",
       pid,
       appExecutable: this.appExecutable,
       remoteDebugPort,
@@ -2654,8 +2886,46 @@ export class EasyConnectRuntime {
     const remoteDebugPort = options.remoteDebugPort ?? null;
     const forceKill = options.forceKill ?? true;
     const agentProxyReadyTimeoutMs = options.agentProxyReadyTimeoutMs ?? 15000;
+    const recoveryDiagnostics = options.skipPreRecoveryDiagnostics === true
+      ? null
+      : await this.collectRecoveryDiagnostics().catch(() => null);
+    const bypassReuseBecauseOfficialCrashed = isOfficialUiCrashDiagnostics(recoveryDiagnostics);
 
+    if (options.reuseExisting !== false && !bypassReuseBecauseOfficialCrashed) {
+      const reusedExistingMainApp = await this.findReusableRemoteDebugPageTarget({
+        remoteDebugPort,
+        timeoutMs: options.existingRemoteDebugTimeoutMs ?? 1200,
+        responsiveTimeoutMs: options.existingRemoteDebugResponsiveTimeoutMs ?? 1200,
+        signal: options.signal,
+      });
+
+      if (reusedExistingMainApp) {
+        const disabledOfficialAutoConnect = await this.disableOfficialAutoConnectBeforeLaunch({ remoteDebugPort });
+
+        return {
+          mode: "reuse-existing-main-app",
+          reusedExistingMainApp,
+          killed: {
+            action: "skipped-existing-debug-target",
+            reason: "EasyConnect already has a responsive remote-debug page target; do not restart or duplicate the official app.",
+          },
+          killedCoreServices: null,
+          resetAgentProxy: null,
+          agentProxyReady: null,
+          disabledOfficialAutoConnect,
+          launched: null,
+          recoveryDiagnostics,
+        };
+      }
+    }
+
+    const existingMainAppProcesses = await this.listMainAppProcesses().catch(() => []);
     const killed = await this.killMainAppProcesses({ force: forceKill });
+    const mainAppStopped = await this.waitForMainAppProcessesStopped({
+      timeoutMs: options.mainAppStopTimeoutMs ?? 10000,
+      pollMs: options.mainAppStopPollMs ?? 500,
+      signal: options.signal,
+    });
     const killedCoreServices = await this.killCoreServiceProcesses({ force: forceKill });
     const resetAgentProxy = await this.resetAgentProxy({ force: forceKill });
     const agentProxyReady = await this.waitForAgentProxyReady({
@@ -2663,21 +2933,147 @@ export class EasyConnectRuntime {
       signal: options.signal,
     });
     const disabledOfficialAutoConnect = await this.disableOfficialAutoConnectBeforeLaunch({ remoteDebugPort });
-    const launched = await this.launchMainAppUserMode({ remoteDebugPort });
+    const launched = await this.launchMainAppUserMode({
+      remoteDebugPort,
+      reuseExisting: false,
+      failIfAlreadyRunning: true,
+    });
 
     return {
+      mode: "relaunch-main-app",
+      existingMainAppProcesses,
       killed,
+      mainAppStopped,
       killedCoreServices,
       resetAgentProxy,
       agentProxyReady,
       disabledOfficialAutoConnect,
       launched,
+      recoveryDiagnostics,
+      reuseBypassed: bypassReuseBecauseOfficialCrashed
+        ? {
+          reason: "recent official EasyConnect crash diagnostics; do not reuse a responsive but poisoned renderer target",
+          classification: recoveryDiagnostics?.classification ?? null,
+        }
+        : null,
     };
   }
 
   async getRemoteDebugTargets(remoteDebugPort = 9222, options = {}) {
     const timeoutMs = typeof options === "number" ? options : options.timeoutMs ?? 5000;
     return requestJson(`http://127.0.0.1:${remoteDebugPort}/json/list`, timeoutMs);
+  }
+
+  async findReusableRemoteDebugPageTarget(options = {}) {
+    const remoteDebugPort = options.remoteDebugPort ?? 9222;
+    const timeoutMs = options.timeoutMs ?? 1200;
+    const responsiveTimeoutMs = options.responsiveTimeoutMs ?? timeoutMs;
+
+    if (!remoteDebugPort || timeoutMs <= 0) {
+      return null;
+    }
+
+    let targets = [];
+    try {
+      targets = await this.getRemoteDebugTargets(remoteDebugPort, { timeoutMs });
+    } catch {
+      return null;
+    }
+
+    const pageTargets = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
+    const errors = [];
+
+    for (const target of pageTargets) {
+      throwIfAborted(options.signal);
+      if (isBrokenRemoteDebugPageTarget(target) || !isReusableRemoteDebugPageTargetCandidate(target)) {
+        errors.push({
+          id: target.id ?? null,
+          url: target.url ?? null,
+          title: target.title ?? null,
+          error: "target is not a reusable EasyConnect portal state",
+        });
+        continue;
+      }
+
+      try {
+        const responsive = await this.ensureRemoteDebugPageTargetResponsive(target, {
+          ...options,
+          timeoutMs: responsiveTimeoutMs,
+        });
+
+        if (responsive) {
+          return {
+            remoteDebugPort,
+            target,
+            targetCount: pageTargets.length,
+          };
+        }
+      } catch (error) {
+        errors.push({
+          id: target.id ?? null,
+          url: target.url ?? null,
+          error: error?.message ?? String(error),
+        });
+      }
+    }
+
+    return null;
+  }
+
+  async waitForPortalLoginAuthBridgeReady(targetUrlPart = "/portal/#!/login", options = {}) {
+    const remoteDebugPort = options.remoteDebugPort ?? 9222;
+    const timeoutMs = options.timeoutMs ?? 30000;
+    const pollMs = options.pollMs ?? 1000;
+    const signal = options.signal;
+    const startedAt = Date.now();
+    let lastProbe = null;
+    let lastTarget = null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      throwIfAborted(signal);
+      try {
+        const target = await this.waitForRemoteDebugTarget(targetUrlPart, {
+          remoteDebugPort,
+          timeoutMs: Math.min(pollMs, Math.max(250, timeoutMs - (Date.now() - startedAt))),
+          pollMs: Math.min(pollMs, 250),
+          signal,
+        });
+        lastTarget = {
+          id: target.id,
+          url: target.url,
+          title: target.title,
+        };
+
+        const probe = await this.evaluateOnRemoteDebugPageTarget(
+          target,
+          buildPortalOfficialAuthStateExpression(),
+          {
+            ...options,
+            timeoutMs: Math.min(options.probeTimeoutMs ?? 5000, timeoutMs),
+          },
+        );
+        lastProbe = probe.evaluation?.result?.value ?? null;
+
+        if (isPortalLoginAuthBridgeReady(lastProbe, targetUrlPart)) {
+          return {
+            ...target,
+            authBridgeProbe: lastProbe,
+          };
+        }
+      } catch (error) {
+        lastProbe = {
+          error: error?.message ?? String(error),
+        };
+      }
+
+      await sleep(pollMs, signal);
+    }
+
+    const error = new Error(`Timed out waiting for official login auth bridge: ${JSON.stringify(lastProbe)}`);
+    error.code = "EASYCONNECT_OFFICIAL_LOGIN_TARGET_NOT_READY";
+    error.lastProbe = lastProbe;
+    error.lastTarget = lastTarget;
+    throw error;
   }
 
   async createRemoteDebugTarget(targetUrl, options = {}) {
@@ -2917,7 +3313,7 @@ export class EasyConnectRuntime {
       throw new Error("triggerPortalOfficialPasswordLogin requires username and password");
     }
 
-    const target = await this.waitForRemoteDebugTarget(targetUrlPart, {
+    const target = await this.waitForPortalLoginAuthBridgeReady(targetUrlPart, {
       remoteDebugPort,
       timeoutMs,
       pollMs,
@@ -2941,7 +3337,7 @@ export class EasyConnectRuntime {
       );
       lastProbe = probe.evaluation?.result?.value ?? null;
 
-      if (lastProbe?.hasAuth && lastProbe?.hasSFAPI && lastProbe?.hasSetting && lastProbe?.hasSession) {
+      if (isPortalLoginAuthBridgeReady(lastProbe, targetUrlPart)) {
         const result = await this.evaluateOnRemoteDebugPageTarget(
           target,
           buildPortalOfficialPasswordLoginExpression(username, password, captcha),
@@ -3360,7 +3756,7 @@ export class EasyConnectRuntime {
     const waitForResponsiveTarget = async () => {
       const target = await this.waitForRemoteDebugTarget(targetUrlPart, options);
       await this.ensureRemoteDebugPageTargetResponsive(target, options);
-      return target;
+      return this.waitForPortalLoginAuthBridgeReady(targetUrlPart, options);
     };
 
     try {
@@ -3513,6 +3909,7 @@ export class EasyConnectRuntime {
   async collectRecoveryDiagnostics() {
     const todayLogPath = path.join(LOGS_DIR, `EasyConnect_${os.userInfo().username}.${new Date().toISOString().slice(0, 10).replaceAll("-", "")}.log`);
     const diagnostics = {
+      collectedAt: Date.now(),
       processes: await this.listCoreServiceProcesses().catch(() => null),
       agentProcesses: await this.listAgentProcesses().catch(() => null),
       officialLogs: {

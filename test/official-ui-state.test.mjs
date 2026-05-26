@@ -67,6 +67,37 @@ test("describeOfficialUiConsistency warns when tunnel is online but official UI 
   );
 });
 
+test("buildOfficialUiState classifies connect_notfound as a blocking failed probe", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "connect-notfound",
+        type: "page",
+        title: "EasyConnect",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html?from=https%3A%2F%2F198.51.100.20%3A9898%2Fportal%2F%23!%2Fservice",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "连接失败 可能部分公司内网无法访问 刷新",
+      },
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "hidden",
+        hidden: true,
+        bodyText: "资源搜索 默认资源组",
+      },
+    ],
+  });
+
+  assert.equal(state.primaryTarget.kind, "probe-failed");
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasBlockingVisibleTarget, true);
+  assert.equal(formatOfficialUiMetric(state), "探测失败");
+});
+
 test("describeOfficialUiConsistency returns null when service page is the primary official UI", () => {
   const state = buildOfficialUiState({
     reachable: true,

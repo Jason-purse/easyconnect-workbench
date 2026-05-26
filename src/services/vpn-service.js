@@ -192,6 +192,62 @@ function sanitizeEnsureOnlineResult(result) {
   return next;
 }
 
+function shouldRepairResidualOfficialTarget(target = {}) {
+  if (!target.id || !target.visible) {
+    return false;
+  }
+
+  const url = `${target.url ?? ""}`;
+  return target.kind === "service-failed" || url.includes("/local/connect_notfound/connect_notfound.html");
+}
+
+function buildOfficialUiResidualRepairPlan(officialUi = {}) {
+  const targets = officialUi.targets ?? [];
+
+  return targets
+    .filter((target) => shouldRepairResidualOfficialTarget(target))
+    .map((target) => ({
+      id: target.id,
+      kind: target.kind,
+      title: target.title,
+      url: target.url,
+    }));
+}
+
+function officialUiNeedsRepair(officialUi = {}) {
+  const residualTargets = buildOfficialUiResidualRepairPlan(officialUi);
+  return Boolean(officialUi?.hasServiceTarget && residualTargets.length > 0);
+}
+
+async function navigateResidualOfficialUiTargets(runtime, targets = [], serviceUrl, options = {}) {
+  if (targets.length === 0 || typeof runtime?.navigateRemoteDebugTarget !== "function") {
+    return [];
+  }
+
+  const navigated = [];
+  for (const target of targets) {
+    if (target.kind === "service") {
+      continue;
+    }
+
+    try {
+      navigated.push({
+        ...target,
+        result: await runtime.navigateRemoteDebugTarget(target.url, serviceUrl, options),
+      });
+    } catch (error) {
+      navigated.push({
+        ...target,
+        result: {
+          ok: false,
+          error: error?.message ?? String(error),
+        },
+      });
+    }
+  }
+  return navigated;
+}
+
 async function describeOfficialUiState(runtime, remoteDebugPort) {
   if (
     typeof runtime?.getRemoteDebugTargets !== "function" ||
@@ -301,7 +357,9 @@ export class VpnService {
             const [loginStatus, serviceState, localRuntimeInfo] = await Promise.all([
               runtime.getLoginStatus(activeSession.token),
               runtime.getServiceState(activeSession.token),
-              runtime.getLocalRuntimeInfo(activeSession.token),
+              runtime.getLocalRuntimeInfo(activeSession.token).catch((error) => ({
+                error: error?.message ?? String(error),
+              })),
             ]);
 
             return {
@@ -324,10 +382,14 @@ export class VpnService {
           localRuntimeInfo: null,
         };
 
+    const latestCachedTokenPromise = activeSession?.token
+      ? Promise.resolve(null)
+      : runtime.describeLatestCachedToken();
+
     const [bundleSettingPath, port, latestCachedToken, gatewayCandidates, appExecutableExists] = await Promise.all([
       runtime.getBundleSettingPath(),
       runtime.getPort(),
-      runtime.describeLatestCachedToken(),
+      latestCachedTokenPromise,
       runtime.getGatewayCandidates(),
       this.existsFn(runtime.appExecutable),
     ]);
@@ -444,7 +506,17 @@ export class VpnService {
     }
 
     const officialUi = onlineStatus.officialUi;
-    const needsRepair = officialUi?.hasBlockingVisibleTarget || !officialUi?.hasServiceTarget;
+    const residualTargets = buildOfficialUiResidualRepairPlan(officialUi);
+    if (residualTargets.length > 0 && !officialUi?.hasServiceTarget) {
+      return {
+        action: "skip-unsafe-ui-repair",
+        reason: "VPN tunnel is online but no service target exists; avoiding local EasyConnect window mutation.",
+        residualTargets,
+        status: onlineStatus,
+      };
+    }
+
+    const needsRepair = officialUiNeedsRepair(officialUi);
     if (!needsRepair) {
       return {
         action: "already-consistent",
@@ -460,16 +532,6 @@ export class VpnService {
     const serviceTargetUrlPart = "/portal/#!/service";
     const serviceUrl = `https://${gateway.host}:${gateway.port}${serviceTargetUrlPart}`;
     const primaryTarget = officialUi?.primaryTarget ?? null;
-    const sourceTargetUrlPart = targetUrlPartForRepair(primaryTarget);
-    let navigation = null;
-
-    if (sourceTargetUrlPart && sourceTargetUrlPart !== serviceTargetUrlPart) {
-      navigation = await runtime.navigatePortalRoute(sourceTargetUrlPart, serviceUrl, {
-        remoteDebugPort,
-        timeoutMs: portalTimeoutMs,
-        pollMs,
-      });
-    }
 
     await runtime.waitForRemoteDebugTarget(serviceTargetUrlPart, {
       remoteDebugPort,
@@ -514,6 +576,10 @@ export class VpnService {
       timeoutMs: portalTimeoutMs,
       pollMs,
     });
+    const repairedResidualTargets = await navigateResidualOfficialUiTargets(runtime, residualTargets, serviceUrl, {
+      remoteDebugPort,
+      timeoutMs: 5000,
+    });
 
     return {
       action: "repair-official-ui",
@@ -526,10 +592,11 @@ export class VpnService {
             url: primaryTarget.url,
           }
         : null,
-      navigation,
+      navigation: null,
       serviceSync,
       bridge,
       serviceReload,
+      repairedResidualTargets,
       status,
     };
   }

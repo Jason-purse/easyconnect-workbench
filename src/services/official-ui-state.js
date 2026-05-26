@@ -36,6 +36,10 @@ function classifyTarget(target = {}, signals = {}) {
     return signals.probeFailed ? "probe-failed" : "connect";
   }
 
+  if (url.includes("/local/connect_notfound/connect_notfound.html")) {
+    return "probe-failed";
+  }
+
   if (url.includes("/portal/#!/login")) {
     return "login";
   }

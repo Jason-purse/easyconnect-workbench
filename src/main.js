@@ -189,7 +189,7 @@ async function waitForMaintainerCycle(minCycleCount, timeoutMs, pollMs = 250) {
 
   while (Date.now() - startedAt < timeoutMs) {
     const status = vpnMaintainer.getStatus();
-    if (status.cycleCount >= minCycleCount) {
+    if (status.cycleCount >= minCycleCount && status.lastEvent) {
       return status;
     }
 
@@ -601,7 +601,8 @@ function startTrayRefresh() {
   }
 
   trayRefreshTimer = setInterval(updateTrayMenu, TRAY_REFRESH_INTERVAL_MS);
-  trayRefreshTimer.unref?.();
+  // Keep this timer referenced: hidden launch has no BrowserWindow, so the tray
+  // heartbeat is the Workbench process residency guard when maintainer is idle.
 }
 
 function createAppTray() {

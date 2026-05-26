@@ -9,12 +9,16 @@ import path from "node:path";
 import {
   EasyConnectRuntime,
   buildAgentProxyResetFinalState,
+  buildContainerConfigWriteExpression,
+  buildContainerRuntimeBatchWriteExpression,
+  buildContainerRuntimeWriteExpression,
   buildLaunchctlActionEntry,
   buildPortalOfficialServiceStartExpression,
   buildPortalGlobalWriteSpecs,
   buildPortalInitConfigData,
   buildPortalOfficialPasswordLoginExpression,
   buildPortalReloadExpression,
+  extractTokensFromCacheFromDir,
   filterProcessesByExecutable,
   parseLaunchctlPrintState,
 } from "../src/easyconnect-bridge/runtime.mjs";
@@ -150,11 +154,94 @@ test("buildPortalGlobalWriteSpecs does not leave initGetInitConfigData empty on 
   ]);
 });
 
+test("buildPortalGlobalWriteSpecs never emits undefined container write values", () => {
+  const result = buildPortalGlobalWriteSpecs(
+    {
+      sessionId: "session-1",
+      gatewayHost: "203.0.113.10",
+      gatewayPort: 9898,
+      username: undefined,
+      browserType: undefined,
+      lang: undefined,
+      loginClientType: undefined,
+      trayType: undefined,
+      twfIDTmp: undefined,
+      ecGuid: undefined,
+      reloginStatus: undefined,
+      isFromEC: undefined,
+      hasTcpResource: undefined,
+      hasRemoteApp: undefined,
+      lastVPNURL: undefined,
+      vpnURLList: undefined,
+      initGetInitConfigData: undefined,
+      passwordConfigSummary: {},
+    },
+    { profile: "service" },
+  );
+
+  assert.equal(
+    result.runtimeWriteSpecs.some(([, value]) => value === undefined),
+    false,
+  );
+});
+
+test("container write expressions normalize undefined before calling EasyConnect APIs", () => {
+  const configExpression = buildContainerConfigWriteExpression("token", undefined);
+  const runtimeExpression = buildContainerRuntimeWriteExpression("/global/loginName", undefined);
+  const batchExpression = buildContainerRuntimeBatchWriteExpression([
+    { keyPath: "/global/loginName", value: undefined, persist: 0 },
+  ]);
+
+  assert.doesNotMatch(configExpression, /undefined/);
+  assert.doesNotMatch(runtimeExpression, /undefined/);
+  assert.doesNotMatch(batchExpression, /undefined/);
+  assert.match(configExpression, /ecWriteConfig\("token", ""/);
+  assert.equal(runtimeExpression.includes('ecSet("/global/loginName", "", 0)'), true);
+  assert.match(batchExpression, /"value":""/);
+});
+
 test("buildPortalReloadExpression schedules a real page reload after returning", () => {
   const expression = buildPortalReloadExpression();
 
   assert.match(expression, /setTimeout\(\(\) => location\.reload\(\), 0\)/);
   assert.match(expression, /beforeHref/);
+});
+
+test("extractTokensFromCacheFromDir caps cache scanning in huge EasyConnect cache dirs", async () => {
+  const entries = Array.from({ length: 3000 }, (_, index) => ({
+    name: `entry-${index}`,
+    isFile: () => true,
+  }));
+  let statCalls = 0;
+
+  const fsOps = {
+    async access() {},
+    async opendir() {
+      return {
+        async *[Symbol.asyncIterator]() {
+          for (const entry of entries) {
+            yield entry;
+          }
+        },
+        async close() {},
+      };
+    },
+    async stat(filePath) {
+      statCalls += 1;
+      const index = Number.parseInt(filePath.match(/entry-(\d+)$/)?.[1] ?? "0", 10);
+      return {
+        mtimeMs: 10_000 - index,
+      };
+    },
+    async readFile(filePath) {
+      return Buffer.from(filePath.endsWith("entry-0") ? "token=0123456789abcdef0123456789abcdef" : "", "latin1");
+    },
+  };
+
+  const tokens = await extractTokensFromCacheFromDir("/tmp/cache", 40, fsOps);
+
+  assert.equal(statCalls, 2000);
+  assert.deepEqual(tokens, ["0123456789abcdef0123456789abcdef"]);
 });
 
 test("filterProcessesByExecutable does not match executable name prefixes", () => {
@@ -242,13 +329,306 @@ gui/501/com.sangfor.ECAgentProxy = {
   });
 });
 
+test("recoverViaUserMode reuses an existing responsive EasyConnect debug target instead of relaunching", async () => {
+  const calls = [];
+  const existingTarget = {
+    remoteDebugPort: 9222,
+    targetCount: 1,
+    target: {
+      id: "target-1",
+      type: "page",
+      url: "https://198.51.100.20:9898/portal/#!/login",
+      webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/target-1",
+    },
+  };
+
+  class TestRuntime extends EasyConnectRuntime {
+    async findReusableRemoteDebugPageTarget(options) {
+      calls.push(["findReusableRemoteDebugPageTarget", options.remoteDebugPort]);
+      return existingTarget;
+    }
+
+    async collectRecoveryDiagnostics() {
+      calls.push("collectRecoveryDiagnostics");
+      return { classification: "unknown" };
+    }
+
+    async disableOfficialAutoConnectBeforeLaunch(options) {
+      calls.push(["disableOfficialAutoConnectBeforeLaunch", options.remoteDebugPort]);
+      return { ok: true, action: "already-enabled" };
+    }
+
+    async killMainAppProcesses() {
+      calls.push("killMainAppProcesses");
+      return {};
+    }
+
+    async launchMainAppUserMode() {
+      calls.push("launchMainAppUserMode");
+      return {};
+    }
+  }
+
+  const result = await new TestRuntime().recoverViaUserMode({ remoteDebugPort: 9222 });
+
+  assert.deepEqual(calls, [
+    "collectRecoveryDiagnostics",
+    ["findReusableRemoteDebugPageTarget", 9222],
+    ["disableOfficialAutoConnectBeforeLaunch", 9222],
+  ]);
+  assert.equal(result.mode, "reuse-existing-main-app");
+  assert.deepEqual(result.reusedExistingMainApp, existingTarget);
+  assert.equal(result.launched, null);
+  assert.equal(result.killed.action, "skipped-existing-debug-target");
+});
+
+test("findReusableRemoteDebugPageTarget rejects loading and connect failure targets", async () => {
+  const calls = [];
+
+  class TestRuntime extends EasyConnectRuntime {
+    async getRemoteDebugTargets() {
+      return [
+        {
+          id: "loading-login",
+          type: "page",
+          title: "Loading...",
+          url: "https://198.51.100.20:9898/portal/#!/login",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/loading-login",
+        },
+        {
+          id: "connect-notfound",
+          type: "page",
+          title: "EasyConnect",
+          url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html?from=https%3A%2F%2F198.51.100.20%3A9898%2Fportal%2F%23!%2Fservice",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/connect-notfound",
+        },
+        {
+          id: "connect-page",
+          type: "page",
+          title: "EasyConnect",
+          url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/connect-page",
+        },
+      ];
+    }
+
+    async ensureRemoteDebugPageTargetResponsive(target) {
+      calls.push(["ensureRemoteDebugPageTargetResponsive", target.id]);
+      return true;
+    }
+  }
+
+  const result = await new TestRuntime().findReusableRemoteDebugPageTarget({ remoteDebugPort: 9222 });
+
+  assert.equal(result, null);
+  assert.deepEqual(calls, []);
+});
+
+test("recoverViaUserMode relaunches when existing remote targets are only broken pages", async () => {
+  const calls = [];
+
+  class TestRuntime extends EasyConnectRuntime {
+    async getRemoteDebugTargets() {
+      calls.push("getRemoteDebugTargets");
+      return [
+        {
+          id: "notfound",
+          type: "page",
+          title: "EasyConnect",
+          url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/notfound",
+        },
+      ];
+    }
+
+    async collectRecoveryDiagnostics() {
+      calls.push("collectRecoveryDiagnostics");
+      return { classification: "unknown" };
+    }
+
+    async listMainAppProcesses() {
+      calls.push("listMainAppProcesses");
+      return [{ pid: 9001, ppid: 1, command: this.appExecutable }];
+    }
+
+    async killMainAppProcesses() {
+      calls.push("killMainAppProcesses");
+      return { forced: true };
+    }
+
+    async waitForMainAppProcessesStopped() {
+      calls.push("waitForMainAppProcessesStopped");
+      return { ok: true, processes: [] };
+    }
+
+    async killCoreServiceProcesses() {
+      calls.push("killCoreServiceProcesses");
+      return { forced: true };
+    }
+
+    async resetAgentProxy() {
+      calls.push("resetAgentProxy");
+      return { finalState: { ok: true, running: true } };
+    }
+
+    async waitForAgentProxyReady() {
+      calls.push("waitForAgentProxyReady");
+      return { ok: true, running: true };
+    }
+
+    async disableOfficialAutoConnectBeforeLaunch() {
+      calls.push("disableOfficialAutoConnectBeforeLaunch");
+      return { ok: true, action: "already-enabled" };
+    }
+
+    async launchMainAppUserMode() {
+      calls.push("launchMainAppUserMode");
+      return { action: "launched", pid: 1234 };
+    }
+  }
+
+  const result = await new TestRuntime().recoverViaUserMode({ remoteDebugPort: 9222 });
+
+  assert.equal(result.mode, "relaunch-main-app");
+  assert.equal(result.launched.pid, 1234);
+  assert.deepEqual(calls, [
+    "collectRecoveryDiagnostics",
+    "getRemoteDebugTargets",
+    "listMainAppProcesses",
+    "killMainAppProcesses",
+    "waitForMainAppProcessesStopped",
+    "killCoreServiceProcesses",
+    "resetAgentProxy",
+    "waitForAgentProxyReady",
+    "disableOfficialAutoConnectBeforeLaunch",
+    "launchMainAppUserMode",
+  ]);
+});
+
+test("recoverViaUserMode relaunches when recent official logs show a native crash even if a target responds", async () => {
+  const calls = [];
+  const existingTarget = {
+    remoteDebugPort: 9222,
+    targetCount: 1,
+    target: {
+      id: "login-target",
+      type: "page",
+      title: "EasyConnect",
+      url: "https://198.51.100.20:9898/portal/#!/login",
+      webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/login-target",
+    },
+  };
+
+  class TestRuntime extends EasyConnectRuntime {
+    async collectRecoveryDiagnostics() {
+      calls.push("collectRecoveryDiagnostics");
+      return {
+        classification: "official-ui-crashed",
+        officialLogs: {
+          easyconnect: [
+            "crash_service run exception, reason:uncaughtException descrition: AssertionError [ERR_ASSERTION]",
+            "Assert(typeof value!=\"undefined\")",
+          ],
+        },
+      };
+    }
+
+    async findReusableRemoteDebugPageTarget() {
+      calls.push("findReusableRemoteDebugPageTarget");
+      return existingTarget;
+    }
+
+    async listMainAppProcesses() {
+      calls.push("listMainAppProcesses");
+      return [{ pid: 9001, ppid: 1, command: this.appExecutable }];
+    }
+
+    async killMainAppProcesses() {
+      calls.push("killMainAppProcesses");
+      return { forced: true };
+    }
+
+    async waitForMainAppProcessesStopped() {
+      calls.push("waitForMainAppProcessesStopped");
+      return { ok: true, processes: [] };
+    }
+
+    async killCoreServiceProcesses() {
+      calls.push("killCoreServiceProcesses");
+      return { forced: true };
+    }
+
+    async resetAgentProxy() {
+      calls.push("resetAgentProxy");
+      return { finalState: { ok: true, running: true } };
+    }
+
+    async waitForAgentProxyReady() {
+      calls.push("waitForAgentProxyReady");
+      return { ok: true, running: true };
+    }
+
+    async disableOfficialAutoConnectBeforeLaunch() {
+      calls.push("disableOfficialAutoConnectBeforeLaunch");
+      return { ok: true, action: "already-enabled" };
+    }
+
+    async launchMainAppUserMode() {
+      calls.push("launchMainAppUserMode");
+      return { action: "launched", pid: 1234 };
+    }
+  }
+
+  const result = await new TestRuntime().recoverViaUserMode({ remoteDebugPort: 9222 });
+
+  assert.equal(result.mode, "relaunch-main-app");
+  assert.equal(result.reuseBypassed.classification, "official-ui-crashed");
+  assert.deepEqual(calls, [
+    "collectRecoveryDiagnostics",
+    "listMainAppProcesses",
+    "killMainAppProcesses",
+    "waitForMainAppProcessesStopped",
+    "killCoreServiceProcesses",
+    "resetAgentProxy",
+    "waitForAgentProxyReady",
+    "disableOfficialAutoConnectBeforeLaunch",
+    "launchMainAppUserMode",
+  ]);
+});
+
 test("recoverViaUserMode clears stale core services before relaunching EasyConnect", async () => {
   const calls = [];
 
   class TestRuntime extends EasyConnectRuntime {
+    async collectRecoveryDiagnostics() {
+      calls.push("collectRecoveryDiagnostics");
+      return { classification: "unknown" };
+    }
+
+    async findReusableRemoteDebugPageTarget(options) {
+      calls.push(["findReusableRemoteDebugPageTarget", options.remoteDebugPort]);
+      return null;
+    }
+
+    async listMainAppProcesses() {
+      calls.push("listMainAppProcesses");
+      return [
+        {
+          pid: 9001,
+          ppid: 1,
+          command: this.appExecutable,
+        },
+      ];
+    }
+
     async killMainAppProcesses(options) {
       calls.push(["killMainAppProcesses", options.force]);
       return { command: "EasyConnect", forced: options.force };
+    }
+
+    async waitForMainAppProcessesStopped(options) {
+      calls.push(["waitForMainAppProcessesStopped", options.timeoutMs]);
+      return { ok: true, processes: [] };
     }
 
     async killCoreServiceProcesses(options) {
@@ -288,7 +668,11 @@ test("recoverViaUserMode clears stale core services before relaunching EasyConne
   });
 
   assert.deepEqual(calls, [
+    "collectRecoveryDiagnostics",
+    ["findReusableRemoteDebugPageTarget", 9222],
+    "listMainAppProcesses",
     ["killMainAppProcesses", true],
+    ["waitForMainAppProcessesStopped", 10000],
     ["killCoreServiceProcesses", true],
     ["resetAgentProxy", true],
     ["waitForAgentProxyReady", 15000],
@@ -299,6 +683,14 @@ test("recoverViaUserMode clears stale core services before relaunching EasyConne
     commands: ["CSClient", "svpnservice"],
     forced: true,
   });
+  assert.deepEqual(result.existingMainAppProcesses, [
+    {
+      pid: 9001,
+      ppid: 1,
+      command: runtime.appExecutable,
+    },
+  ]);
+  assert.deepEqual(result.mainAppStopped, { ok: true, processes: [] });
   assert.deepEqual(result.resetAgentProxy, {
     label: "com.sangfor.ECAgentProxy",
     forced: true,
@@ -313,13 +705,146 @@ test("recoverViaUserMode clears stale core services before relaunching EasyConne
   });
 });
 
+test("launchMainAppFromEcAgent preserves remote debugging when relaunching the official UI", async () => {
+  const calls = [];
+
+  class TestRuntime extends EasyConnectRuntime {
+    async getPort() {
+      calls.push("getPort");
+      return 54530;
+    }
+
+    async killMainAppProcesses() {
+      calls.push("killMainAppProcesses");
+      return {};
+    }
+
+    async waitForMainAppProcessesStopped() {
+      calls.push("waitForMainAppProcessesStopped");
+      return { ok: true, processes: [] };
+    }
+
+    spawnMainApp(args) {
+      calls.push(["spawnMainApp", args]);
+      return 7001;
+    }
+  }
+
+  const runtime = new TestRuntime();
+  const result = await runtime.launchMainAppFromEcAgent("session-1", {
+    remoteDebugPort: 9222,
+  });
+
+  assert.deepEqual(calls, [
+    "getPort",
+    "killMainAppProcesses",
+    "waitForMainAppProcessesStopped",
+    [
+      "spawnMainApp",
+      [
+        "--remote-debugging-port=9222",
+        "--from",
+        "ecagent",
+        "--agentport",
+        "54530",
+        "--token",
+        EasyConnectRuntime.deriveToken("session-1"),
+        "--twfid",
+        EasyConnectRuntime.encodeLaunchTwfId("session-1"),
+      ],
+    ],
+  ]);
+  assert.equal(result.pid, 7001);
+  assert.equal(result.remoteDebugPort, 9222);
+  assert.equal(result.token, EasyConnectRuntime.deriveToken("session-1"));
+});
+
+test("launchMainAppUserMode restarts an existing non-debuggable official app instead of stacking a second instance", async () => {
+  const calls = [];
+
+  class TestRuntime extends EasyConnectRuntime {
+    async findReusableRemoteDebugPageTarget(options) {
+      calls.push(["findReusableRemoteDebugPageTarget", options.remoteDebugPort]);
+      return null;
+    }
+
+    async listMainAppProcesses() {
+      calls.push("listMainAppProcesses");
+      return [
+        {
+          pid: 9002,
+          ppid: 1,
+          command: this.appExecutable,
+        },
+      ];
+    }
+
+    async killMainAppProcesses(options) {
+      calls.push(["killMainAppProcesses", options.force]);
+      return { command: this.appExecutable, forced: options.force };
+    }
+
+    async waitForMainAppProcessesStopped(options) {
+      calls.push(["waitForMainAppProcessesStopped", options.timeoutMs]);
+      return { ok: true, processes: [] };
+    }
+
+    spawnMainApp(args) {
+      calls.push(["spawnMainApp", args]);
+      return 9003;
+    }
+  }
+
+  const runtime = new TestRuntime();
+  const result = await runtime.launchMainAppUserMode({ remoteDebugPort: 9222 });
+
+  assert.deepEqual(calls, [
+    ["findReusableRemoteDebugPageTarget", 9222],
+    "listMainAppProcesses",
+    ["killMainAppProcesses", true],
+    ["waitForMainAppProcessesStopped", 10000],
+    ["spawnMainApp", ["--remote-debugging-port=9222"]],
+  ]);
+  assert.equal(result.action, "restarted-existing-without-debug");
+  assert.equal(result.pid, 9003);
+  assert.deepEqual(result.existingProcesses, [
+    {
+      pid: 9002,
+      ppid: 1,
+      command: runtime.appExecutable,
+    },
+  ]);
+  assert.deepEqual(result.killed, { command: runtime.appExecutable, forced: true });
+  assert.deepEqual(result.mainAppStopped, { ok: true, processes: [] });
+});
+
 test("recoverViaUserMode does not relaunch EasyConnect before ECAgentProxy is ready", async () => {
   const calls = [];
 
   class TestRuntime extends EasyConnectRuntime {
+    async collectRecoveryDiagnostics() {
+      calls.push("collectRecoveryDiagnostics");
+      return { classification: "unknown" };
+    }
+
+    async findReusableRemoteDebugPageTarget() {
+      calls.push("findReusableRemoteDebugPageTarget");
+      return null;
+    }
+
+    async listMainAppProcesses() {
+      calls.push("listMainAppProcesses");
+      return [];
+    }
+
     async killMainAppProcesses() {
       calls.push("killMainAppProcesses");
       return {};
+    }
+
+    async waitForMainAppProcessesStopped() {
+      calls.push("waitForMainAppProcessesStopped");
+      return { ok: true, processes: [] };
     }
 
     async killCoreServiceProcesses() {
@@ -355,7 +880,11 @@ test("recoverViaUserMode does not relaunch EasyConnect before ECAgentProxy is re
     (error) => error.code === "EASYCONNECT_AGENT_PROXY_NOT_READY",
   );
   assert.deepEqual(calls, [
+    "collectRecoveryDiagnostics",
+    "findReusableRemoteDebugPageTarget",
+    "listMainAppProcesses",
     "killMainAppProcesses",
+    "waitForMainAppProcessesStopped",
     "killCoreServiceProcesses",
     "resetAgentProxy",
     "waitForAgentProxyReady",
@@ -1039,6 +1568,25 @@ test("openPortalLoginTarget relaunches when the existing login target is not res
       return true;
     }
 
+    async waitForPortalLoginAuthBridgeReady(targetUrlPart, options) {
+      calls.push(["waitForPortalLoginAuthBridgeReady", targetUrlPart, options.remoteDebugPort]);
+      const target = await this.waitForRemoteDebugTarget(targetUrlPart, options);
+      if (target.id === "login-target-1") {
+        const error = new Error("Timed out waiting for official login auth bridge");
+        error.code = "EASYCONNECT_OFFICIAL_LOGIN_TARGET_NOT_READY";
+        throw error;
+      }
+      return {
+        ...target,
+        authBridgeProbe: {
+          hasAuth: true,
+          hasSFAPI: true,
+          hasSetting: true,
+          hasSession: true,
+        },
+      };
+    }
+
     async waitForAnyRemoteDebugPageTarget() {
       calls.push("waitForAnyRemoteDebugPageTarget");
       this.waitAnyCount += 1;
@@ -1065,7 +1613,7 @@ test("openPortalLoginTarget relaunches when the existing login target is not res
     timeoutMs: 1000,
   });
 
-  assert.equal(result.id, "login-target-2");
+  assert.equal(result.id, "login-target-3");
   assert.equal(result.recovery.mode, "user");
   assert.match(result.staleTargetError, /WebSocket message/);
   assert.deepEqual(
@@ -1116,8 +1664,18 @@ test("openPortalLoginTarget navigates from gateway page with CDP Page.navigate",
       return { ok: true, requestedUrl: targetUrl };
     }
 
-    async evaluateOnRemoteDebugPageTarget() {
-      throw new Error("Page JS redirect should not be used before portal runtime is ready");
+    async waitForPortalLoginAuthBridgeReady(targetUrlPart, options) {
+      calls.push(["waitForPortalLoginAuthBridgeReady", targetUrlPart, options.remoteDebugPort]);
+      const target = await this.waitForRemoteDebugTarget(targetUrlPart, options);
+      return {
+        ...target,
+        authBridgeProbe: {
+          hasAuth: true,
+          hasSFAPI: true,
+          hasSetting: true,
+          hasSession: true,
+        },
+      };
     }
   }
 
@@ -1136,6 +1694,116 @@ test("openPortalLoginTarget navigates from gateway page with CDP Page.navigate",
     calls.some((call) => Array.isArray(call) && call[0] === "ensureRemoteDebugPageTargetResponsive"),
     true,
   );
+});
+
+test("openPortalLoginTarget waits for the official auth bridge instead of accepting a Loading login URL", async () => {
+  const calls = [];
+
+  class TestRuntime extends EasyConnectRuntime {
+    constructor() {
+      super();
+      this.loginTargetReady = false;
+    }
+
+    async waitForRemoteDebugTarget(targetUrlPart, options) {
+      calls.push(["waitForRemoteDebugTarget", targetUrlPart, options.remoteDebugPort]);
+      if (!this.loginTargetReady) {
+        throw new Error(`Timed out waiting for devtools target: ${targetUrlPart}`);
+      }
+
+      return {
+        id: "login-target",
+        url: `https://198.51.100.20:9898${targetUrlPart}`,
+        title: "Loading...",
+        webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/login-target",
+      };
+    }
+
+    async ensureRemoteDebugPageTargetResponsive(target) {
+      calls.push(["ensureRemoteDebugPageTargetResponsive", target.id]);
+      return true;
+    }
+
+    async waitForPortalLoginAuthBridgeReady(targetUrlPart, options) {
+      calls.push(["waitForPortalLoginAuthBridgeReady", targetUrlPart, options.remoteDebugPort]);
+      return {
+        id: "login-target",
+        url: `https://198.51.100.20:9898${targetUrlPart}`,
+        title: "EasyConnect",
+        authBridgeProbe: {
+          hasAuth: true,
+          hasSFAPI: true,
+          hasSetting: true,
+          hasSession: true,
+        },
+      };
+    }
+
+    async waitForAnyRemoteDebugPageTarget() {
+      calls.push("waitForAnyRemoteDebugPageTarget");
+      return {
+        id: "gateway-target",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+        title: "EasyConnect",
+      };
+    }
+
+    async navigateRemoteDebugPageTarget(target, targetUrl) {
+      calls.push(["navigateRemoteDebugPageTarget", target.id, targetUrl]);
+      this.loginTargetReady = true;
+      return { ok: true, requestedUrl: targetUrl };
+    }
+  }
+
+  const runtime = new TestRuntime();
+  const result = await runtime.openPortalLoginTarget("198.51.100.20", 9898, "/portal/#!/login", {
+    remoteDebugPort: 9222,
+    timeoutMs: 1000,
+  });
+
+  assert.equal(result.id, "login-target");
+  assert.deepEqual(
+    calls.filter((call) => Array.isArray(call) && call[0] === "waitForPortalLoginAuthBridgeReady"),
+    [["waitForPortalLoginAuthBridgeReady", "/portal/#!/login", 9222]],
+  );
+});
+
+test("triggerPortalOfficialPasswordLogin refuses to run on a non-login page even when SF.auth exists", async () => {
+  const calls = [];
+
+  class TestRuntime extends EasyConnectRuntime {
+    async waitForPortalLoginAuthBridgeReady() {
+      calls.push("waitForPortalLoginAuthBridgeReady");
+      const error = new Error("Timed out waiting for official login auth bridge");
+      error.code = "EASYCONNECT_OFFICIAL_LOGIN_TARGET_NOT_READY";
+      error.lastProbe = {
+        href: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html",
+        title: "EasyConnect",
+        hasAuth: true,
+        hasSFAPI: true,
+        hasSetting: true,
+        hasSession: true,
+      };
+      throw error;
+    }
+
+    async evaluateOnRemoteDebugPageTarget() {
+      calls.push("evaluateOnRemoteDebugPageTarget");
+      return {};
+    }
+  }
+
+  const runtime = new TestRuntime();
+
+  await assert.rejects(
+    () => runtime.triggerPortalOfficialPasswordLogin({
+      username: "demo-user",
+      password: "secret",
+      timeoutMs: 10,
+    }),
+    (error) => error.code === "EASYCONNECT_OFFICIAL_LOGIN_TARGET_NOT_READY",
+  );
+  assert.deepEqual(calls, ["waitForPortalLoginAuthBridgeReady"]);
 });
 
 test("recoverLoginViaPageBridge lets official auto-login win before backend password login", async () => {
