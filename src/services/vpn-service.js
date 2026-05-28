@@ -192,13 +192,37 @@ function sanitizeEnsureOnlineResult(result) {
   return next;
 }
 
-function shouldRepairResidualOfficialTarget(target = {}) {
-  if (!target.id || !target.visible) {
+function isConnectNotfoundTarget(target = {}) {
+  return `${target.url ?? ""}`.includes("/local/connect_notfound/connect_notfound.html");
+}
+
+function shouldCloseResidualOfficialTarget(target = {}) {
+  if (!target.id) {
     return false;
   }
 
-  const url = `${target.url ?? ""}`;
-  return target.kind === "service-failed" || url.includes("/local/connect_notfound/connect_notfound.html");
+  return isConnectNotfoundTarget(target);
+}
+
+function shouldRepairResidualOfficialTarget(target = {}) {
+  if (!target.id) {
+    return false;
+  }
+
+  return target.visible && target.kind === "service-failed";
+}
+
+function buildOfficialUiResidualClosePlan(officialUi = {}) {
+  const targets = officialUi.targets ?? [];
+
+  return targets
+    .filter((target) => shouldCloseResidualOfficialTarget(target))
+    .map((target) => ({
+      id: target.id,
+      kind: target.kind,
+      title: target.title,
+      url: target.url,
+    }));
 }
 
 function buildOfficialUiResidualRepairPlan(officialUi = {}) {
@@ -251,8 +275,73 @@ function buildOfficialUiServiceRestorePlan(officialUi = {}) {
 }
 
 function officialUiNeedsRepair(officialUi = {}) {
+  const closeTargets = buildOfficialUiResidualClosePlan(officialUi);
   const residualTargets = buildOfficialUiResidualRepairPlan(officialUi);
-  return Boolean(officialUi?.hasServiceTarget && residualTargets.length > 0);
+  return Boolean(officialUi?.hasServiceTarget && (closeTargets.length > 0 || residualTargets.length > 0));
+}
+
+function findPreferredServiceTarget(officialUi = {}) {
+  return (
+    (officialUi.targets ?? []).find((target) => target.kind === "service" && target.visible) ??
+    (officialUi.targets ?? []).find((target) => target.kind === "service") ??
+    null
+  );
+}
+
+async function closeResidualOfficialWindowTargets(runtime, targets = [], options = {}) {
+  if (targets.length === 0) {
+    return [];
+  }
+
+  if (typeof runtime?.closeOfficialWindowTarget !== "function") {
+    return targets.map((target) => ({
+      ...target,
+      result: {
+        ok: false,
+        error: "Runtime does not support official window close.",
+      },
+    }));
+  }
+
+  const closed = [];
+  for (const target of targets) {
+    try {
+      closed.push({
+        ...target,
+        result: await runtime.closeOfficialWindowTarget(target.url, options),
+      });
+    } catch (error) {
+      closed.push({
+        ...target,
+        result: {
+          ok: false,
+          error: error?.message ?? String(error),
+        },
+      });
+    }
+  }
+
+  return closed;
+}
+
+async function bringServiceTargetToFront(runtime, serviceTarget, options = {}) {
+  if (!serviceTarget?.url || typeof runtime?.bringRemoteDebugTargetToFront !== "function") {
+    return null;
+  }
+
+  try {
+    return await runtime.bringRemoteDebugTargetToFront(serviceTarget.url, options);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message ?? String(error),
+      target: {
+        id: serviceTarget.id,
+        url: serviceTarget.url,
+        title: serviceTarget.title,
+      },
+    };
+  }
 }
 
 async function navigateResidualOfficialUiTargets(runtime, targets = [], serviceUrl, options = {}) {
@@ -628,6 +717,7 @@ export class VpnService {
     }
 
     const officialUi = onlineStatus.officialUi;
+    const closeResidualTargets = buildOfficialUiResidualClosePlan(officialUi);
     const residualTargets = buildOfficialUiResidualRepairPlan(officialUi);
     const gateway = resolveRepairGateway(config, officialUi);
     if (!gateway) {
@@ -663,6 +753,7 @@ export class VpnService {
           serviceUrl,
           restoreTargets,
           restoreAttempts: restore.attempts,
+          closeResidualTargets,
           residualTargets,
           status: onlineStatus,
         };
@@ -688,6 +779,7 @@ export class VpnService {
         restoredFrom: restore.restoredFrom,
         navigation: restore.navigation,
         restoreAttempts: restore.attempts,
+        closedResidualTargets: [],
         repairedResidualTargets: [],
         ...serviceRefresh,
         status,
@@ -707,10 +799,22 @@ export class VpnService {
       portalTimeoutMs,
       pollMs,
     });
+    const closedResidualTargets = await closeResidualOfficialWindowTargets(runtime, closeResidualTargets, {
+      remoteDebugPort,
+      timeoutMs: 5000,
+    });
     const repairedResidualTargets = await navigateResidualOfficialUiTargets(runtime, residualTargets, serviceUrl, {
       remoteDebugPort,
       timeoutMs: 5000,
     });
+    const focusedServiceTarget = await bringServiceTargetToFront(
+      runtime,
+      findPreferredServiceTarget(officialUi),
+      {
+        remoteDebugPort,
+        timeoutMs: 5000,
+      },
+    );
 
     return {
       action: "repair-official-ui",
@@ -725,7 +829,9 @@ export class VpnService {
         : null,
       navigation: null,
       ...serviceRefresh,
+      closedResidualTargets,
       repairedResidualTargets,
+      focusedServiceTarget,
       status,
     };
   }

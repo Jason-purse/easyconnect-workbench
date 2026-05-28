@@ -520,7 +520,7 @@ test("VpnService.repairOfficialUi restores the missing service target from an on
   ]);
 });
 
-test("VpnService.repairOfficialUi repairs failed targets and leaves status or duplicate service targets alone", async () => {
+test("VpnService.repairOfficialUi closes connect_notfound residuals instead of cloning service targets", async () => {
   const calls = [];
   const fakeRuntime = {
     async describeActiveSession() {
@@ -623,6 +623,14 @@ test("VpnService.repairOfficialUi repairs failed targets and leaves status or du
       calls.push(["navigateRemoteDebugTarget", targetUrlPart, targetUrl, options.remoteDebugPort]);
       return { ok: true, requestedUrl: targetUrl };
     },
+    async closeOfficialWindowTarget(targetUrlPart, options) {
+      calls.push(["closeOfficialWindowTarget", targetUrlPart, options.remoteDebugPort]);
+      return { ok: true, closedBy: "official-window-api" };
+    },
+    async bringRemoteDebugTargetToFront(targetUrlPart, options) {
+      calls.push(["bringRemoteDebugTargetToFront", targetUrlPart, options.remoteDebugPort]);
+      return { ok: true, targetUrlPart };
+    },
     appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
   };
 
@@ -642,14 +650,153 @@ test("VpnService.repairOfficialUi repairs failed targets and leaves status or du
   assert.equal(result.action, "repair-official-ui");
   assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigatePortalRoute"), []);
   assert.deepEqual(
-    calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget").map((call) => call[1]),
+    calls.filter((call) => Array.isArray(call) && call[0] === "closeOfficialWindowTarget").map((call) => call[1]),
     [
       "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html?from=https%3A%2F%2F198.51.100.20%3A9898%2Fportal%2F%23!%2Fservice",
     ],
   );
-  assert.deepEqual(result.repairedResidualTargets.map((target) => [target.id, target.kind]), [
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget"), []);
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "bringRemoteDebugTargetToFront"), [
+    ["bringRemoteDebugTargetToFront", "https://198.51.100.20:9898/portal/#!/service", 9222],
+  ]);
+  assert.deepEqual(result.closedResidualTargets.map((target) => [target.id, target.kind]), [
     ["notfound-target", "probe-failed"],
   ]);
+  assert.deepEqual(result.repairedResidualTargets, []);
+});
+
+test("VpnService.repairOfficialUi closes a hidden connect_notfound residual when service target exists", async () => {
+  const calls = [];
+  const notfoundUrl =
+    "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html?from=https%3A%2F%2F198.51.100.20%3A9898%2Fportal%2F%23!%2Flogin";
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return {
+        token: "secret-token",
+        sessionId: "session-1",
+      };
+    },
+    async getLoginStatus() {
+      return { status: "1" };
+    },
+    async getServiceState() {
+      return { base: "18", l3vpn: "18", tcp: "43" };
+    },
+    async getLocalRuntimeInfo() {
+      return { enableAutoLogin: 0 };
+    },
+    async getRemoteDebugTargets() {
+      return [
+        {
+          id: "service-target",
+          type: "page",
+          title: "EasyConnect",
+          url: "https://198.51.100.20:9898/portal/#!/service",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/service-target",
+        },
+        {
+          id: "notfound-target",
+          type: "page",
+          title: "EasyConnect",
+          url: notfoundUrl,
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/notfound-target",
+        },
+        {
+          id: "status-target",
+          type: "page",
+          title: "EasyConnect",
+          url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/vpn_status_manager/vpn_status_manager.html",
+          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/status-target",
+        },
+      ];
+    },
+    async evaluateOnRemoteDebugPageTarget(target) {
+      return {
+        evaluation: {
+          result: {
+            value: {
+              href: target.url,
+              title: target.title,
+              visibilityState: target.id === "status-target" ? "visible" : "hidden",
+              hidden: target.id !== "status-target",
+              bodyText: target.id === "service-target" ? "资源搜索 默认资源组" : "",
+            },
+          },
+        },
+      };
+    },
+    async getBundleSettingPath() {
+      return "/Applications/EasyConnect.app/Contents/Resources/conf/setting_demo.json";
+    },
+    async getPort() {
+      return 54530;
+    },
+    async describeLatestCachedToken() {
+      return {};
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    async waitForRemoteDebugTarget(targetUrlPart, options) {
+      calls.push(["waitForRemoteDebugTarget", targetUrlPart, options.remoteDebugPort]);
+      return { id: "service-target", url: "https://198.51.100.20:9898/portal/#!/service" };
+    },
+    async syncPortalGlobalState(targetUrlPart, context, options) {
+      calls.push(["syncPortalGlobalState", targetUrlPart, context.sessionId, context.gatewayHost, context.gatewayPort, options.profile]);
+      return { ok: true };
+    },
+    async bootstrapViaPageBridge(targetUrlPart, context, options) {
+      calls.push(["bootstrapViaPageBridge", targetUrlPart, context.sessionId, options.remoteDebugPort]);
+      return { ok: true, token: "derived-token" };
+    },
+    async reloadPortalTarget(targetUrlPart, options) {
+      calls.push(["reloadPortalTarget", targetUrlPart, options.remoteDebugPort]);
+      return { ok: true, href: "https://198.51.100.20:9898/portal/#!/service" };
+    },
+    async navigateRemoteDebugTarget(targetUrlPart, targetUrl, options) {
+      calls.push(["navigateRemoteDebugTarget", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      return { ok: true, requestedUrl: targetUrl };
+    },
+    async closeOfficialWindowTarget(targetUrlPart, options) {
+      calls.push(["closeOfficialWindowTarget", targetUrlPart, options.remoteDebugPort]);
+      return { ok: true, closedBy: "official-window-api" };
+    },
+    async bringRemoteDebugTargetToFront(targetUrlPart, options) {
+      calls.push(["bringRemoteDebugTargetToFront", targetUrlPart, options.remoteDebugPort]);
+      return { ok: true, targetUrlPart };
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+  });
+
+  const result = await service.repairOfficialUi({
+    vpn: {
+      username: "demo-user",
+      remoteDebugPort: 9222,
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+    },
+  });
+
+  assert.equal(result.action, "repair-official-ui");
+  assert.deepEqual(
+    calls.filter((call) => Array.isArray(call) && call[0] === "closeOfficialWindowTarget"),
+    [
+      [
+        "closeOfficialWindowTarget",
+        notfoundUrl,
+        9222,
+      ],
+    ],
+  );
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget"), []);
+  assert.deepEqual(result.closedResidualTargets.map((target) => [target.id, target.kind]), [
+    ["notfound-target", "probe-failed"],
+  ]);
+  assert.deepEqual(result.repairedResidualTargets, []);
 });
 
 test("VpnService.repairOfficialUi treats status windows as consistent when the tunnel has a service target", async () => {

@@ -3250,6 +3250,76 @@ export class EasyConnectRuntime {
     return this.navigateRemoteDebugPageTarget(target, targetUrl, options);
   }
 
+  async bringRemoteDebugPageTargetToFront(target, options = {}) {
+    const response = await sendRemoteDebugCommand(target, "Page.bringToFront", {}, options);
+
+    return {
+      ok: true,
+      result: response.result ?? {},
+      target: {
+        id: target.id,
+        url: target.url,
+        title: target.title,
+      },
+    };
+  }
+
+  async bringRemoteDebugTargetToFront(targetUrlPart, options = {}) {
+    const remoteDebugPort = options?.remoteDebugPort ?? 9222;
+    const target = await this.waitForRemoteDebugTarget(targetUrlPart, {
+      ...options,
+      remoteDebugPort,
+    });
+
+    return this.bringRemoteDebugPageTargetToFront(target, options);
+  }
+
+  async closeOfficialWindowPageTarget(target, options = {}) {
+    const expression = `(() => {
+      const containerId = window.SFConfig && SFConfig.CONTAINER_WINDOW_ID
+        ? SFConfig.CONTAINER_WINDOW_ID.CURRENT_WINDOW
+        : "";
+      const closeByWindowMgr = window.SF && SF.windowMgr && typeof SF.windowMgr.close === "function";
+      if (closeByWindowMgr) {
+        setTimeout(() => SF.windowMgr.close(containerId), 0);
+        return { ok: true, method: "SF.windowMgr.close", containerId: String(containerId) };
+      }
+
+      if (typeof window.ecClose === "function") {
+        setTimeout(() => window.ecClose(containerId), 0);
+        return { ok: true, method: "ecClose", containerId: String(containerId) };
+      }
+
+      if (typeof window.close === "function") {
+        setTimeout(() => window.close(), 0);
+        return { ok: true, method: "window.close", containerId: String(containerId) };
+      }
+
+      return { ok: false, reason: "No official close API is available", containerId: String(containerId) };
+    })()`;
+
+    const result = await this.evaluateOnRemoteDebugPageTarget(target, expression, options);
+    return {
+      ok: result.evaluation?.result?.value?.ok === true,
+      value: result.evaluation?.result?.value ?? null,
+      target: {
+        id: target.id,
+        url: target.url,
+        title: target.title,
+      },
+    };
+  }
+
+  async closeOfficialWindowTarget(targetUrlPart, options = {}) {
+    const remoteDebugPort = options?.remoteDebugPort ?? 9222;
+    const target = await this.waitForRemoteDebugTarget(targetUrlPart, {
+      ...options,
+      remoteDebugPort,
+    });
+
+    return this.closeOfficialWindowPageTarget(target, options);
+  }
+
   async triggerPortalPasswordLogin(options) {
     const username = options?.username;
     const password = options?.password;
