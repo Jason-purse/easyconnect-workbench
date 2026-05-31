@@ -98,6 +98,43 @@ test("buildOfficialUiState classifies connect_notfound as a blocking failed prob
   assert.equal(formatOfficialUiMetric(state), "探测失败");
 });
 
+test("buildOfficialUiState does not treat a plain connect page as blocking when service exists", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "hidden",
+        hidden: true,
+        bodyText: "资源搜索 默认资源组",
+      },
+      {
+        id: "connect",
+        type: "page",
+        title: "EasyConnect",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "",
+      },
+    ],
+  });
+
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.targets.find((target) => target.id === "connect").kind, "connect");
+  assert.equal(state.hasBlockingVisibleTarget, false);
+  assert.equal(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    null,
+  );
+});
+
 test("describeOfficialUiConsistency returns null when service page is the primary official UI", () => {
   const state = buildOfficialUiState({
     reachable: true,

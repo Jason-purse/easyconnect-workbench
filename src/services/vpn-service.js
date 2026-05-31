@@ -42,6 +42,38 @@ function sanitizeBridgeResult(result) {
   return next;
 }
 
+function sanitizeRemoteDebugOperationResult(result) {
+  if (!result || typeof result !== "object") {
+    return result;
+  }
+
+  const sanitizeNode = (node) => {
+    if (Array.isArray(node)) {
+      return node.map(sanitizeNode);
+    }
+
+    if (!node || typeof node !== "object") {
+      return typeof node === "string" ? sanitizeDebugUrl(node) : node;
+    }
+
+    const next = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === "string") {
+        next[key] = key.toLowerCase().includes("url") || key.toLowerCase() === "error"
+          ? sanitizeDebugUrl(value)
+          : value;
+        continue;
+      }
+
+      next[key] = sanitizeNode(value);
+    }
+
+    return next;
+  };
+
+  return sanitizeNode(JSON.parse(JSON.stringify(result)));
+}
+
 function normalizeGateway(gateway) {
   const host = `${gateway?.host ?? ""}`.trim();
   const port = Number.parseInt(`${gateway?.port ?? ""}`, 10) || null;
@@ -308,14 +340,14 @@ async function closeResidualOfficialWindowTargets(runtime, targets = [], options
     try {
       closed.push({
         ...target,
-        result: await runtime.closeOfficialWindowTarget(target.url, options),
+        result: sanitizeRemoteDebugOperationResult(await runtime.closeOfficialWindowTarget(target.id ?? target.url, options)),
       });
     } catch (error) {
       closed.push({
         ...target,
         result: {
           ok: false,
-          error: error?.message ?? String(error),
+          error: sanitizeDebugUrl(error?.message ?? String(error)),
         },
       });
     }
@@ -330,11 +362,11 @@ async function bringServiceTargetToFront(runtime, serviceTarget, options = {}) {
   }
 
   try {
-    return await runtime.bringRemoteDebugTargetToFront(serviceTarget.url, options);
+    return sanitizeRemoteDebugOperationResult(await runtime.bringRemoteDebugTargetToFront(serviceTarget.id ?? serviceTarget.url, options));
   } catch (error) {
     return {
       ok: false,
-      error: error?.message ?? String(error),
+      error: sanitizeDebugUrl(error?.message ?? String(error)),
       target: {
         id: serviceTarget.id,
         url: serviceTarget.url,
@@ -358,14 +390,14 @@ async function navigateResidualOfficialUiTargets(runtime, targets = [], serviceU
     try {
       navigated.push({
         ...target,
-        result: await runtime.navigateRemoteDebugTarget(target.url, serviceUrl, options),
+        result: sanitizeRemoteDebugOperationResult(await runtime.navigateRemoteDebugTarget(target.id ?? target.url, serviceUrl, options)),
       });
     } catch (error) {
       navigated.push({
         ...target,
         result: {
           ok: false,
-          error: error?.message ?? String(error),
+          error: sanitizeDebugUrl(error?.message ?? String(error)),
         },
       });
     }
@@ -385,7 +417,9 @@ async function navigateServiceRestoreTarget(runtime, candidates = [], serviceUrl
   const attempts = [];
   for (const candidate of candidates) {
     try {
-      const result = await runtime.navigateRemoteDebugTarget(candidate.url, serviceUrl, options);
+      const result = sanitizeRemoteDebugOperationResult(
+        await runtime.navigateRemoteDebugTarget(candidate.id ?? candidate.url, serviceUrl, options),
+      );
       const attempt = {
         ...candidate,
         result,
@@ -404,7 +438,7 @@ async function navigateServiceRestoreTarget(runtime, candidates = [], serviceUrl
         ...candidate,
         result: {
           ok: false,
-          error: error?.message ?? String(error),
+          error: sanitizeDebugUrl(error?.message ?? String(error)),
         },
       });
     }

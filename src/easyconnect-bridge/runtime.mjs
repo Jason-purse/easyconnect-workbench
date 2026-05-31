@@ -3103,7 +3103,7 @@ export class EasyConnectRuntime {
       throwIfAborted(signal);
       try {
         const targets = await this.getRemoteDebugTargets(remoteDebugPort);
-        const target = targets.find((item) => item.url.includes(targetUrlPart));
+        const target = targets.find((item) => item.id === targetUrlPart || item.url.includes(targetUrlPart));
         if (target) {
           return target;
         }

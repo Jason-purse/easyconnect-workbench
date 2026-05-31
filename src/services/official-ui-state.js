@@ -99,8 +99,16 @@ function rankPrimaryTarget(target = {}) {
   return ranks[target.kind] ?? 8;
 }
 
-function isBlockingVisibleTarget(target = {}) {
-  return isVisible(target) && ["probe-failed", "connect", "login", "service-failed"].includes(target.kind);
+function isBlockingVisibleTarget(target = {}, context = {}) {
+  if (!isVisible(target)) {
+    return false;
+  }
+
+  if (target.kind === "connect") {
+    return !context.hasServiceTarget;
+  }
+
+  return ["probe-failed", "login", "service-failed"].includes(target.kind);
 }
 
 export function buildOfficialUiState({ reachable = true, remoteDebugPort = 9222, targets = [], error = null } = {}) {
@@ -137,6 +145,7 @@ export function buildOfficialUiState({ reachable = true, remoteDebugPort = 9222,
 
   const primaryTarget =
     [...normalizedTargets].sort((left, right) => rankPrimaryTarget(left) - rankPrimaryTarget(right))[0] ?? null;
+  const hasServiceTarget = normalizedTargets.some((target) => target.kind === "service");
 
   return {
     reachable: true,
@@ -144,8 +153,8 @@ export function buildOfficialUiState({ reachable = true, remoteDebugPort = 9222,
     error: null,
     targets: normalizedTargets,
     primaryTarget,
-    hasServiceTarget: normalizedTargets.some((target) => target.kind === "service"),
-    hasBlockingVisibleTarget: normalizedTargets.some(isBlockingVisibleTarget),
+    hasServiceTarget,
+    hasBlockingVisibleTarget: normalizedTargets.some((target) => isBlockingVisibleTarget(target, { hasServiceTarget })),
   };
 }
 

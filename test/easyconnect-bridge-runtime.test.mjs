@@ -2140,3 +2140,25 @@ test("ensureOnline exposes service page reload evidence from the recovery chain"
   assert.deepEqual(result.serviceReload, serviceReload);
   assert.deepEqual(result.coreServices, coreServices);
 });
+
+test("EasyConnectRuntime.waitForRemoteDebugTarget can locate a page by target id", async () => {
+  class TestRuntime extends EasyConnectRuntime {
+    async getRemoteDebugTargets() {
+      return [
+        {
+          id: "target-1",
+          type: "page",
+          title: "EasyConnect",
+          url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html?from=https%3A%2F%2F198.51.100.20%3A9898%2Fportal%2Fshortcut.html%3Ftwfid%3D0123456789abcdef0123456789abcdef",
+        },
+      ];
+    }
+  }
+
+  const target = await new TestRuntime().waitForRemoteDebugTarget("target-1", {
+    timeoutMs: 100,
+    pollMs: 10,
+  });
+
+  assert.equal(target.id, "target-1");
+});
