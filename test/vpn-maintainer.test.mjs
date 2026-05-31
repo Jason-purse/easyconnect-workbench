@@ -102,6 +102,7 @@ test("VpnMaintainer repairs official UI after a successful online cycle", async 
       repairCalls.push({
         lastKnownGateway: config.vpn.lastKnownGateway,
         remoteDebugPort: options.remoteDebugPort,
+        focusServiceTarget: options.focusServiceTarget ?? false,
       });
       return {
         action: "repair-official-ui",
@@ -140,6 +141,7 @@ test("VpnMaintainer repairs official UI after a successful online cycle", async 
     {
       lastKnownGateway: { host: "198.51.100.20", port: 9898 },
       remoteDebugPort: 9223,
+      focusServiceTarget: false,
     },
   ]);
   assert.equal(status.lastEvent?.ok, true);
@@ -459,6 +461,92 @@ test("VpnMaintainer still repairs official UI after a real recovery inside coold
   assert.equal(status.cycleCount, 2);
   assert.equal(status.lastEvent?.result?.action, "relogin-page-bridge");
   assert.equal(status.lastEvent?.result?.officialUiRepair?.action, "already-consistent");
+
+  finishLoop();
+  await manager.stop();
+});
+
+test("VpnMaintainer rechecks official UI after a real repair before applying stable cooldown", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+
+  if (!VpnMaintainer) {
+    assert.fail("VpnMaintainer is missing");
+  }
+
+  let finishLoop = null;
+  let now = 1_000;
+  let repairCalls = 0;
+  const manager = new VpnMaintainer({
+    nowFn: () => now,
+    runtimeFactory: () => ({
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => ({
+      action: "already-online",
+      activeSession: {
+        sessionId: "stable-session",
+        token: "secret-session-token",
+      },
+      loginStatus: {
+        status: "1",
+      },
+      serviceState: {
+        base: "18",
+        l3vpn: "18",
+        tcp: "43",
+      },
+    }),
+    repairOfficialUiFn: async () => {
+      repairCalls += 1;
+      return {
+        action: repairCalls === 1 ? "repair-official-ui" : "already-consistent",
+      };
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle }) => {
+      const first = await ensureOnlineFn({});
+      await onCycle({
+        ok: true,
+        result: first,
+      });
+
+      now += 60_000;
+      const second = await ensureOnlineFn({});
+      await onCycle({
+        ok: true,
+        result: second,
+      });
+
+      now += 60_000;
+      const third = await ensureOnlineFn({});
+      await onCycle({
+        ok: true,
+        result: third,
+      });
+
+      return new Promise((resolve) => {
+        finishLoop = resolve;
+      });
+    },
+  });
+
+  await manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+      officialUiRepairCooldownMs: 15 * 60 * 1000,
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const status = manager.getStatus();
+
+  assert.equal(repairCalls, 2);
+  assert.equal(status.cycleCount, 3);
+  assert.equal(status.lastEvent?.result?.officialUiRepair?.action, "skip-recently-consistent");
 
   finishLoop();
   await manager.stop();

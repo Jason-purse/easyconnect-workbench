@@ -726,6 +726,7 @@ export class VpnService {
     const portalTimeoutMs = options.portalTimeoutMs ?? 45000;
     const pollMs = options.pollMs ?? 1000;
     const knownOnlineStatus = options.knownOnlineStatus ?? null;
+    const focusServiceTarget = options.focusServiceTarget ?? false;
     const statusSnapshot = await this.getSnapshot(config);
     const status = statusSnapshot.status;
 
@@ -841,14 +842,16 @@ export class VpnService {
       remoteDebugPort,
       timeoutMs: 5000,
     });
-    const focusedServiceTarget = await bringServiceTargetToFront(
-      runtime,
-      findPreferredServiceTarget(officialUi),
-      {
-        remoteDebugPort,
-        timeoutMs: 5000,
-      },
-    );
+    const focusedServiceTarget = focusServiceTarget
+      ? await bringServiceTargetToFront(
+          runtime,
+          findPreferredServiceTarget(officialUi),
+          {
+            remoteDebugPort,
+            timeoutMs: 5000,
+          },
+        )
+      : null;
 
     return {
       action: "repair-official-ui",

@@ -369,13 +369,14 @@ test("VpnService.repairOfficialUi does not mutate a visible gateway probe page w
     existsFn: async () => true,
   });
 
-  const result = await service.repairOfficialUi({
+  const config = {
     vpn: {
       username: "demo-user",
       remoteDebugPort: 9222,
       gateways: [{ host: "198.51.100.20", port: 9898 }],
     },
-  });
+  };
+  const result = await service.repairOfficialUi(config);
 
   assert.equal(result.action, "already-consistent");
   assert.deepEqual(calls.filter((call) => Array.isArray(call)), [
@@ -490,13 +491,14 @@ test("VpnService.repairOfficialUi restores the missing service target from an on
     existsFn: async () => true,
   });
 
-  const result = await service.repairOfficialUi({
+  const config = {
     vpn: {
       username: "demo-user",
       remoteDebugPort: 9222,
       gateways: [{ host: "198.51.100.20", port: 9898 }],
     },
-  });
+  };
+  const result = await service.repairOfficialUi(config);
 
   assert.equal(result.action, "restore-missing-service-target");
   assert.deepEqual(
@@ -639,13 +641,14 @@ test("VpnService.repairOfficialUi closes connect_notfound residuals instead of c
     existsFn: async () => true,
   });
 
-  const result = await service.repairOfficialUi({
+  const config = {
     vpn: {
       username: "demo-user",
       remoteDebugPort: 9222,
       gateways: [{ host: "198.51.100.20", port: 9898 }],
     },
-  });
+  };
+  const result = await service.repairOfficialUi(config);
 
   assert.equal(result.action, "repair-official-ui");
   assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigatePortalRoute"), []);
@@ -653,13 +656,19 @@ test("VpnService.repairOfficialUi closes connect_notfound residuals instead of c
     "notfound-target",
   ]);
   assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget"), []);
-  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "bringRemoteDebugTargetToFront"), [
-    ["bringRemoteDebugTargetToFront", "service-a", 9222],
-  ]);
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "bringRemoteDebugTargetToFront"), []);
+  assert.equal(result.focusedServiceTarget, null);
   assert.deepEqual(result.closedResidualTargets.map((target) => [target.id, target.kind]), [
     ["notfound-target", "probe-failed"],
   ]);
   assert.deepEqual(result.repairedResidualTargets, []);
+
+  calls.length = 0;
+  const focusedResult = await service.repairOfficialUi(config, { focusServiceTarget: true });
+  assert.equal(focusedResult.action, "repair-official-ui");
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "bringRemoteDebugTargetToFront"), [
+    ["bringRemoteDebugTargetToFront", "service-a", 9222],
+  ]);
 });
 
 test("VpnService.repairOfficialUi closes a hidden connect_notfound residual when service target exists", async () => {

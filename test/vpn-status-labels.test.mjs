@@ -31,7 +31,7 @@ test("describeMaintainerEvent reports automatic official UI repair", () => {
 
   assert.deepEqual(summary, {
     title: "保持在线，官方界面已修复",
-    detail: "VPN 已在线，本轮探活后已把官方窗口拉回服务页。",
+    detail: "VPN 已在线，本轮探活已在后台修复官方服务页状态，不会主动抢前台。",
     variant: "ok",
   });
 });

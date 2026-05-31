@@ -748,6 +748,7 @@ function registerIpc() {
   ipcMain.handle("vpn:repair-official-ui", async (_event, payload = {}) =>
     vpnService.repairOfficialUi(await resolveConfig(payload), {
       remoteDebugPort: payload.remoteDebugPort ?? null,
+      focusServiceTarget: payload.focusServiceTarget ?? true,
     }),
   );
 

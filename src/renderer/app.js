@@ -612,6 +612,7 @@ async function repairOfficialUi() {
     window.workbench.repairOfficialUi({
       config: collectConfig(),
       remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || 9222,
+      focusServiceTarget: true,
     }),
   );
 
