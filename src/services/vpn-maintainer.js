@@ -134,6 +134,33 @@ function isRecoveryInfrastructureReadinessFailure(error) {
   ));
 }
 
+function isOperationResultOk(value) {
+  if (!value || typeof value !== "object") {
+    return true;
+  }
+
+  return value.ok !== false;
+}
+
+function isSuccessfulOfficialUiRepair(repair = {}) {
+  if (repair.action === "already-consistent") {
+    return true;
+  }
+
+  if (repair.action !== "repair-official-ui") {
+    return false;
+  }
+
+  const operationResults = [
+    ...(repair.closedResidualTargets ?? []).map((target) => target?.result),
+    ...(repair.repairedResidualTargets ?? []).map((target) => target?.result),
+    repair.serviceReload,
+    repair.navigation,
+  ].filter(Boolean);
+
+  return operationResults.every(isOperationResultOk);
+}
+
 export class VpnMaintainer {
   constructor(options = {}) {
     this.runtimeFactory =
@@ -195,7 +222,7 @@ export class VpnMaintainer {
     const cooldownMs = getOfficialUiRepairCooldownMs(config);
     const online = getResultOnline(onlineResult);
     const sessionId = online?.activeSession?.sessionId ?? null;
-    const lastRepairIsReusable = this.lastOfficialUiRepair?.action === "already-consistent";
+    const lastRepairIsReusable = Boolean(this.lastOfficialUiRepair?.reusable);
     const canSkipStableOnlineRepair =
       onlineResult?.action === "already-online" &&
       lastRepairIsReusable &&
@@ -222,6 +249,7 @@ export class VpnMaintainer {
           at: now,
           action: repair.action,
           sessionId,
+          reusable: isSuccessfulOfficialUiRepair(repair),
         };
       }
 
