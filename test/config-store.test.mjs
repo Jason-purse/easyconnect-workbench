@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 
 import { ConfigStore, DEFAULT_CONFIG } from "../src/services/config-store.js";
 
@@ -15,13 +15,32 @@ test("DEFAULT_CONFIG keeps maintainer auto-start disabled by default", () => {
   assert.equal(DEFAULT_CONFIG.vpn.maintainerQuietStart, "18:30");
   assert.equal(DEFAULT_CONFIG.vpn.maintainerQuietEnd, "09:00");
   assert.equal(DEFAULT_CONFIG.vpn.lastKnownGateway, null);
-  assert.equal(
-    DEFAULT_CONFIG.portals.build.url,
-    "http://supportweb-ecp-ewell-prodyhkj.192.168.150.42.nip.io",
-  );
-  assert.equal(DEFAULT_CONFIG.portals.release.url, "https://cloudweb.think-go.com");
-  assert.equal(DEFAULT_CONFIG.portals.build.password, "");
-  assert.equal(DEFAULT_CONFIG.portals.release.password, "");
+  assert.equal(Object.hasOwn(DEFAULT_CONFIG, "portals"), false);
+});
+
+test("ConfigStore ignores legacy platform credentials when loading old config", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "easyconnect-workbench-config-"));
+
+  try {
+    await writeFile(
+      path.join(tempDir, "config.json"),
+      JSON.stringify({
+        app: { launchAtLogin: true },
+        vpn: { username: "demo-user", gateways: [{ host: "203.0.113.10", port: 9898 }] },
+        portals: {
+          build: { username: "legacy-build", password: "legacy-secret" },
+          release: { username: "legacy-release", password: "legacy-secret" },
+        },
+      }),
+    );
+
+    const loaded = await new ConfigStore(tempDir).load();
+    assert.equal(loaded.app.launchAtLogin, true);
+    assert.equal(loaded.vpn.username, "demo-user");
+    assert.equal(Object.hasOwn(loaded, "portals"), false);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("ConfigStore persists app launch-at-login preference", async () => {

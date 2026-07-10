@@ -17,8 +17,6 @@ contextBridge.exposeInMainWorld("workbench", {
   getMaintainerStatus: () => ipcRenderer.invoke("vpn:maintainer-status"),
   startMaintainer: (payload) => ipcRenderer.invoke("vpn:maintainer-start", payload),
   stopMaintainer: () => ipcRenderer.invoke("vpn:maintainer-stop"),
-  getBuildPlatformOverview: (payload) => ipcRenderer.invoke("platform:build-overview", payload),
-  getReleasePlatformOverview: (payload) => ipcRenderer.invoke("platform:release-overview", payload),
   openLogsDir: () => ipcRenderer.invoke("app:open-logs"),
   openConfigDir: () => ipcRenderer.invoke("app:open-config-dir"),
 });

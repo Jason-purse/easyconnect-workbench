@@ -63,18 +63,6 @@
           </div>
 
           <div class="sidebar-nav__group">
-            <div class="sidebar-nav__group-title">Adapters</div>
-            <button class="sidebar-nav__item" data-page="build-portal">
-              <span class="sidebar-nav__item-title">构建站</span>
-              <span class="sidebar-nav__item-meta">构建入口与账号收敛</span>
-            </button>
-            <button class="sidebar-nav__item" data-page="release-portal">
-              <span class="sidebar-nav__item-title">发版站</span>
-              <span class="sidebar-nav__item-meta">发版入口与账号收敛</span>
-            </button>
-          </div>
-
-          <div class="sidebar-nav__group">
             <div class="sidebar-nav__group-title">History</div>
             <button class="sidebar-nav__item" data-page="trace-log">
               <span class="sidebar-nav__item-title">最近结果</span>
@@ -107,7 +95,7 @@
               <span class="hero-card__chip">Local Runtime</span>
             </div>
             <div class="hero-card__summary">
-              当前版本聚焦 VPN 自动恢复、运行诊断和构建/发版平台只读探测。
+              当前版本聚焦 VPN 自动登录、连接守护和故障恢复。
             </div>
           </div>
         </header>
@@ -390,111 +378,6 @@
                   <div id="runtime-logs-dir" class="info-card__value">-</div>
                 </div>
               </div>
-            </section>
-          </div>
-        </section>
-
-        <section id="page-build-portal" class="page-section">
-          <div class="workspace-grid">
-            <section class="panel">
-              <div class="panel__header">
-                <div>
-                  <div class="panel__kicker">Adapter</div>
-                  <h3 class="panel__title">构建站</h3>
-                  <p class="panel__description">先走底层 API 读我的应用；服务详情、构建类型和构建日志在下一步按应用继续接。</p>
-                </div>
-                <button id="refresh-build-platform" class="button button--primary">刷新我的应用</button>
-              </div>
-              <div class="form-grid form-grid--triple">
-                <label class="field">
-                  <span>URL</span>
-                  <input id="build-url" type="text" autocomplete="off" />
-                </label>
-                <label class="field">
-                  <span>用户名</span>
-                  <input id="build-username" type="text" autocomplete="off" />
-                </label>
-                <label class="field">
-                  <span>密码</span>
-                  <input id="build-password" type="password" autocomplete="off" />
-                </label>
-              </div>
-              <div class="platform-status">
-                <span>API 状态</span>
-                <strong id="build-api-status">等待刷新</strong>
-              </div>
-              <div id="build-apps-list" class="platform-list">
-                <div class="empty-state">还没有应用数据。</div>
-              </div>
-            </section>
-
-            <section class="panel">
-              <div class="panel__header">
-                <div>
-                  <div class="panel__kicker">Raw API</div>
-                  <h3 class="panel__title">构建站返回</h3>
-                  <p class="panel__description">这里显示脱敏后的 API 结果，用于继续归一字段和设计个人发版流。</p>
-                </div>
-              </div>
-              <pre id="build-api-raw" class="console-block console-block--short"></pre>
-            </section>
-          </div>
-        </section>
-
-        <section id="page-release-portal" class="page-section">
-          <div class="workspace-grid">
-            <section class="panel">
-              <div class="panel__header">
-                <div>
-                  <div class="panel__kicker">Adapter</div>
-                  <h3 class="panel__title">发版站</h3>
-                  <p class="panel__description">发版站先聚合客户、发布概览和发布记录；确认发布等动作后续单独加确认门。</p>
-                </div>
-                <button id="refresh-release-platform" class="button button--primary">刷新发布概览</button>
-              </div>
-              <div class="form-grid form-grid--triple">
-                <label class="field">
-                  <span>URL</span>
-                  <input id="release-url" type="text" autocomplete="off" />
-                </label>
-                <label class="field">
-                  <span>用户名</span>
-                  <input id="release-username" type="text" autocomplete="off" />
-                </label>
-                <label class="field">
-                  <span>密码</span>
-                  <input id="release-password" type="password" autocomplete="off" />
-                </label>
-              </div>
-              <div class="platform-status">
-                <span>API 状态</span>
-                <strong id="release-api-status">等待刷新</strong>
-              </div>
-              <div class="platform-columns">
-                <div>
-                  <div class="platform-column-title">发布概览</div>
-                  <div id="release-overview-list" class="platform-list">
-                    <div class="empty-state">还没有发布概览数据。</div>
-                  </div>
-                </div>
-                <div>
-                  <div class="platform-column-title">发布记录</div>
-                  <div id="release-records-list" class="platform-list">
-                    <div class="empty-state">还没有发布记录数据。</div>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <section class="panel">
-              <div class="panel__header">
-                <div>
-                  <div class="panel__kicker">Raw API</div>
-                  <h3 class="panel__title">发版站返回</h3>
-                  <p class="panel__description">参数结构还需要继续实测，当前先把可读查询入口落到 Workbench。</p>
-                </div>
-              </div>
-              <pre id="release-api-raw" class="console-block console-block--short"></pre>
             </section>
           </div>
         </section>

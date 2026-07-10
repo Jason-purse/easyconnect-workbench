@@ -30,18 +30,6 @@ const PAGE_META = {
     description: "查看当前 EasyConnect 运行状态、调试目标和关键环境路径。",
     actions: ["refresh", "debug-targets"],
   },
-  "build-portal": {
-    kicker: "Adapter",
-    title: "构建站",
-    description: "通过底层 API 读取我的应用和服务构建入口，页面只用于补充确认功能点。",
-    actions: ["save-config"],
-  },
-  "release-portal": {
-    kicker: "Adapter",
-    title: "发版站",
-    description: "聚合发布概览和发布记录，变更动作后续按目标环境二次确认接入。",
-    actions: ["save-config"],
-  },
   "trace-log": {
     kicker: "Trace",
     title: "最近结果",
@@ -59,19 +47,6 @@ const elements = {
   vpnMaintainerAutoStart: $("vpn-maintainer-autostart"),
   vpnAppExecutable: $("vpn-app-executable"),
   vpnGateways: $("vpn-gateways"),
-  buildUrl: $("build-url"),
-  buildUsername: $("build-username"),
-  buildPassword: $("build-password"),
-  buildApiStatus: $("build-api-status"),
-  buildAppsList: $("build-apps-list"),
-  buildApiRaw: $("build-api-raw"),
-  releaseUrl: $("release-url"),
-  releaseUsername: $("release-username"),
-  releasePassword: $("release-password"),
-  releaseApiStatus: $("release-api-status"),
-  releaseOverviewList: $("release-overview-list"),
-  releaseRecordsList: $("release-records-list"),
-  releaseApiRaw: $("release-api-raw"),
   statusBanner: $("status-banner"),
   vpnStatus: $("vpn-status"),
   actionLog: $("action-log"),
@@ -148,76 +123,6 @@ function setActionBusy(button, busy) {
   button.classList.toggle("is-busy", busy);
   button.setAttribute("aria-busy", busy ? "true" : "false");
   setNodeDisabled(button, busy);
-}
-
-function firstPresent(...values) {
-  for (const value of values) {
-    if (value != null && `${value}`.trim()) {
-      return `${value}`.trim();
-    }
-  }
-
-  return "-";
-}
-
-function formatRowTitle(row = {}) {
-  return firstPresent(
-    row.appName,
-    row.appNameEn,
-    row.appCode,
-    row.applicationName,
-    row.name,
-    row.serviceName,
-    row.customerName,
-    row.customerNameCn,
-  );
-}
-
-function formatRowMeta(row = {}) {
-  return [
-    firstPresent(row.customerName, row.customerNameCn, row.customerNameEn),
-    firstPresent(row.appCode, row.appNameEn, row.serviceName),
-    firstPresent(row.envName, row.namespace, row.status, row.publishStatus, row.buildStatus),
-  ]
-    .filter((value) => value && value !== "-")
-    .join(" / ");
-}
-
-function renderMiniList(node, rows, emptyText) {
-  if (!node) {
-    return;
-  }
-
-  const items = Array.isArray(rows) ? rows.slice(0, 12) : [];
-  if (items.length === 0) {
-    node.innerHTML = `<div class="empty-state">${emptyText}</div>`;
-    return;
-  }
-
-  node.innerHTML = items
-    .map((row) => {
-      const title = formatRowTitle(row);
-      const meta = formatRowMeta(row);
-      return `
-        <div class="platform-row">
-          <div>
-            <strong>${escapeHtml(title)}</strong>
-            <span>${escapeHtml(meta || "已返回记录，字段结构待继续归一")}</span>
-          </div>
-          <code>${escapeHtml(firstPresent(row.id, row.appId, row.customerId, row.taskId, row.publishId))}</code>
-        </div>
-      `;
-    })
-    .join("");
-}
-
-function escapeHtml(value) {
-  return `${value ?? ""}`
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }
 
 function setBannerState(title, text, variant = "idle") {
@@ -371,18 +276,6 @@ function collectConfig() {
           };
         }),
     },
-    portals: {
-      build: {
-        url: elements.buildUrl.value.trim(),
-        username: elements.buildUsername.value.trim(),
-        password: elements.buildPassword.value,
-      },
-      release: {
-        url: elements.releaseUrl.value.trim(),
-        username: elements.releaseUsername.value.trim(),
-        password: elements.releasePassword.value,
-      },
-    },
   };
 }
 
@@ -396,13 +289,6 @@ function applyConfig(config) {
   elements.vpnAppExecutable.value = config.vpn.appExecutable ?? "";
   elements.vpnGateways.value = (config.vpn.gateways ?? []).map((item) => `${item.host}:${item.port}`).join("\n");
 
-  elements.buildUrl.value = config.portals.build.url ?? "";
-  elements.buildUsername.value = config.portals.build.username ?? "";
-  elements.buildPassword.value = config.portals.build.password ?? "";
-
-  elements.releaseUrl.value = config.portals.release.url ?? "";
-  elements.releaseUsername.value = config.portals.release.username ?? "";
-  elements.releasePassword.value = config.portals.release.password ?? "";
 }
 
 function renderMaintainerStatus(maintainerStatus) {
@@ -612,72 +498,6 @@ async function saveConfig() {
   showToast("配置已保存", "本地工作台配置已经更新。", "ok");
 }
 
-function validatePortalCredentials(kind) {
-  const url = kind === "build" ? elements.buildUrl.value.trim() : elements.releaseUrl.value.trim();
-  const username = kind === "build" ? elements.buildUsername.value.trim() : elements.releaseUsername.value.trim();
-  const password = kind === "build" ? elements.buildPassword.value : elements.releasePassword.value;
-  if (!url || !username || !password) {
-    const label = kind === "build" ? "构建站" : "发版站";
-    const message = `先填写${label} URL、用户名和密码，再刷新平台 API。`;
-    appendLog("前置校验失败", { action: `${kind}-platform-overview`, message });
-    showToast("缺少平台配置", message, "warn");
-    return false;
-  }
-
-  return true;
-}
-
-async function refreshBuildPlatformOverview() {
-  if (!validatePortalCredentials("build")) {
-    return null;
-  }
-
-  setNodeText(elements.buildApiStatus, "正在登录构建站并读取我的应用...");
-  const result = await withAction("刷新构建站 API", () =>
-    window.workbench.getBuildPlatformOverview({
-      config: collectConfig(),
-      pageSize: 15,
-      pageNumber: 1,
-    }),
-  );
-
-  const loginText = result.login?.ok ? "登录成功" : "登录未确认";
-  setNodeText(
-    elements.buildApiStatus,
-    `${loginText} / 应用 ${result.applications?.rowCount ?? 0} 条 / cookie ${result.login?.cookieCount ?? 0}`,
-  );
-  renderMiniList(elements.buildAppsList, result.applications?.rows ?? [], "还没有应用数据。确认 VPN 在线后再刷新。");
-  setNodeText(elements.buildApiRaw, safeStringify(result));
-  showToast("构建站已刷新", `读取到 ${result.applications?.rowCount ?? 0} 条应用记录。`, "ok");
-  return result;
-}
-
-async function refreshReleasePlatformOverview() {
-  if (!validatePortalCredentials("release")) {
-    return null;
-  }
-
-  setNodeText(elements.releaseApiStatus, "正在登录发版站并读取发布概览...");
-  const result = await withAction("刷新发版站 API", () =>
-    window.workbench.getReleasePlatformOverview({
-      config: collectConfig(),
-      pageSize: 10,
-      pageNumber: 1,
-    }),
-  );
-
-  const loginText = result.login?.ok ? "登录成功" : "登录未确认";
-  setNodeText(
-    elements.releaseApiStatus,
-    `${loginText} / 概览 ${result.overview?.rowCount ?? 0} 条 / 记录 ${result.records?.rowCount ?? 0} 条`,
-  );
-  renderMiniList(elements.releaseOverviewList, result.overview?.rows ?? [], "还没有发布概览数据。");
-  renderMiniList(elements.releaseRecordsList, result.records?.rows ?? [], "还没有发布记录数据。");
-  setNodeText(elements.releaseApiRaw, safeStringify(result));
-  showToast("发版站已刷新", `发布概览 ${result.overview?.rowCount ?? 0} 条，发布记录 ${result.records?.rowCount ?? 0} 条。`, "ok");
-  return result;
-}
-
 async function launchClient() {
   const result = await withAction("拉起官方客户端", () =>
     window.workbench.launchOfficialClient({
@@ -864,8 +684,6 @@ async function init() {
   bindClick($("portal-login"), "portal-login", portalLogin);
   bindClick($("start-maintainer"), "start-maintainer", startMaintainer);
   bindClick($("stop-maintainer"), "stop-maintainer", stopMaintainer);
-  bindClick($("refresh-build-platform"), "refresh-build-platform", refreshBuildPlatformOverview);
-  bindClick($("refresh-release-platform"), "refresh-release-platform", refreshReleasePlatformOverview);
   bindClick($("open-logs"), "open-logs", () => window.workbench.openLogsDir());
   bindClick($("open-config-dir"), "open-config-dir", () => window.workbench.openConfigDir());
   elements.toastClose?.addEventListener("click", hideToast);

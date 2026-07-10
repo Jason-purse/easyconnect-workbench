@@ -3,8 +3,10 @@ export function mergeConfigForRender(currentConfig = {}, storedConfig = {}) {
   const storedVpn = storedConfig?.vpn ?? {};
 
   return {
-    ...storedConfig,
-    ...currentConfig,
+    app: {
+      ...(storedConfig?.app ?? {}),
+      ...(currentConfig?.app ?? {}),
+    },
     vpn: {
       ...storedVpn,
       ...currentVpn,
@@ -13,10 +15,6 @@ export function mergeConfigForRender(currentConfig = {}, storedConfig = {}) {
           ? currentVpn.gateways
           : storedVpn.gateways ?? [],
       lastKnownGateway: storedVpn.lastKnownGateway ?? currentVpn.lastKnownGateway ?? null,
-    },
-    portals: {
-      ...(storedConfig?.portals ?? {}),
-      ...(currentConfig?.portals ?? {}),
     },
   };
 }

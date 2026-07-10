@@ -49,3 +49,20 @@ test("mergeConfigForRender keeps current gateway list when the user has typed on
   assert.deepEqual(merged.vpn.gateways, [{ host: "198.51.100.20", port: 9898 }]);
   assert.deepEqual(merged.vpn.lastKnownGateway, { host: "203.0.113.10", port: 9898 });
 });
+
+test("mergeConfigForRender drops legacy platform configuration", () => {
+  const merged = mergeConfigForRender(
+    {
+      vpn: { username: "demo-user" },
+      portals: { build: { username: "legacy-build" } },
+    },
+    {
+      vpn: { password: "secret" },
+      portals: { release: { username: "legacy-release" } },
+    },
+  );
+
+  assert.equal(merged.vpn.username, "demo-user");
+  assert.equal(merged.vpn.password, "secret");
+  assert.equal("portals" in merged, false);
+});

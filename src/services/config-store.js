@@ -19,18 +19,6 @@ const DEFAULT_CONFIG = {
     appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
     gateways: [],
   },
-  portals: {
-    build: {
-      url: "http://supportweb-ecp-ewell-prodyhkj.192.168.150.42.nip.io",
-      username: "",
-      password: "",
-    },
-    release: {
-      url: "https://cloudweb.think-go.com",
-      username: "",
-      password: "",
-    },
-  },
 };
 
 function normalizeGateways(gateways) {
@@ -94,16 +82,6 @@ function mergeConfig(base, incoming) {
       ),
       appExecutable: `${incoming?.vpn?.appExecutable ?? base.vpn.appExecutable ?? ""}`.trim(),
       gateways: shouldPreserveLearnedGateways ? baseGateways : normalizeGateways(incoming?.vpn?.gateways ?? base.vpn.gateways),
-    },
-    portals: {
-      build: {
-        ...base.portals.build,
-        ...(incoming?.portals?.build ?? {}),
-      },
-      release: {
-        ...base.portals.release,
-        ...(incoming?.portals?.release ?? {}),
-      },
     },
   };
 }

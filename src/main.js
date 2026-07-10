@@ -11,21 +11,6 @@ import { maybeStartMaintainerAutoStart } from "./services/vpn-autostart.js";
 import { buildTrayStatusLabels, buildTrayStatusSignature, buildTrayTooltip } from "./services/app-tray-state.js";
 import { createMaintainerLogger } from "./services/maintainer-log.js";
 import {
-  bootstrapReleaseConsoleSession,
-  createBuildPlatformClient,
-  createReleasePlatformClient,
-  getBuildMyApplications,
-  getReleaseCustomerList,
-  getReleaseCurrentPublishDetail,
-  getReleasePublishOverview,
-  getReleasePublishRecords,
-  loginBuildPlatform,
-  loginReleasePlatform,
-  summarizePlatformLogin,
-  summarizePlatformResult,
-  summarizeRowsResult,
-} from "./services/platform-api-client.js";
-import {
   assertMaintainerFailure,
   assertGatewayConfigUnchanged,
   assertMaintainerOnline,
@@ -867,95 +852,6 @@ function registerIpc() {
     const status = await vpnMaintainer.stop();
     updateTrayMenu();
     return status;
-  });
-
-  ipcMain.handle("platform:build-overview", async (_event, payload = {}) => {
-    const config = await resolveConfig(payload);
-    const portalConfig = config?.portals?.build ?? {};
-    const client = createBuildPlatformClient(portalConfig);
-    const login = await loginBuildPlatform(client, portalConfig);
-    const applications = await getBuildMyApplications(client, {
-      userId: login.userId,
-      pageSize: payload.pageSize ?? 15,
-      pageNumber: payload.pageNumber ?? 1,
-    });
-
-    return {
-      login: summarizePlatformLogin(login),
-      applications: summarizeRowsResult(applications),
-    };
-  });
-
-  ipcMain.handle("platform:release-overview", async (_event, payload = {}) => {
-    const config = await resolveConfig(payload);
-    const portalConfig = config?.portals?.release ?? {};
-    const client = createReleasePlatformClient(portalConfig);
-    const login = await loginReleasePlatform(client, portalConfig);
-    const consoleSession = await bootstrapReleaseConsoleSession(client, login.token).catch((error) => ({
-      ok: false,
-      error: error?.message ?? String(error),
-    }));
-    const customers = await getReleaseCustomerList(client, {
-      customerNameCh: payload.customerNameCh ?? portalConfig.customerNameCh ?? "",
-    }).catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
-
-    const customerRows = customers?.body ? summarizeRowsResult(customers).rows ?? [] : [];
-    const selectedCustomer =
-      customerRows.find((item) => item.customerNameEn === payload.customerNameEn) ??
-      customerRows.find((item) => item.customerNameCh?.includes?.("广安门")) ??
-      customerRows[0] ??
-      null;
-    const customerNameEn = payload.customerNameEn ?? selectedCustomer?.customerNameEn ?? "";
-
-    const overview = customerNameEn
-      ? await getReleasePublishOverview(client, {
-          userId: login.userId,
-          customerNameEn,
-        }).catch((error) => ({ ok: false, error: error?.message ?? String(error) }))
-      : { ok: false, error: "Missing release customerNameEn" };
-
-    const records =
-      payload.applicationCode && payload.showNameEn && payload.environmentFlag && customerNameEn
-        ? await getReleasePublishRecords(client, {
-            customerNameEn,
-            applicationCode: payload.applicationCode,
-            showNameEn: payload.showNameEn,
-            environmentFlag: payload.environmentFlag,
-            imageName: payload.imageName ?? "",
-            beginTime: payload.beginTime ?? "",
-            endTime: payload.endTime ?? "",
-            pageSize: payload.pageSize ?? 10,
-            pageNumber: payload.pageNumber ?? 1,
-          }).catch((error) => ({ ok: false, error: error?.message ?? String(error) }))
-        : null;
-
-    const currentDetail =
-      payload.applicationCode && payload.applicationVersion && payload.showNameEn && payload.environmentFlag && customerNameEn
-        ? await getReleaseCurrentPublishDetail(client, {
-            userId: login.userId,
-            customerNameEn,
-            showNameEn: payload.showNameEn,
-            environmentFlag: payload.environmentFlag,
-            applicationCode: payload.applicationCode,
-            applicationVersion: payload.applicationVersion,
-          }).catch((error) => ({ ok: false, error: error?.message ?? String(error) }))
-        : null;
-
-    return {
-      login: summarizePlatformLogin(login),
-      consoleSession: consoleSession?.body
-        ? {
-            ok: consoleSession.ok,
-            status: consoleSession.status,
-            cookieCount: consoleSession.cookieCount,
-          }
-        : summarizePlatformResult(consoleSession),
-      selectedCustomer,
-      customers: customers?.body ? summarizeRowsResult(customers) : summarizePlatformResult(customers),
-      overview: overview?.body ? summarizeRowsResult(overview) : summarizePlatformResult(overview),
-      records: records?.body ? summarizeRowsResult(records) : records ? summarizePlatformResult(records) : null,
-      currentDetail: currentDetail?.body ? summarizePlatformResult(currentDetail) : currentDetail ? summarizePlatformResult(currentDetail) : null,
-    };
   });
 
   ipcMain.handle("app:open-logs", async () => {
