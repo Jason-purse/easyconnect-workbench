@@ -1,0 +1,477 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  buildOfficialUiState,
+  describeOfficialUiConsistency,
+  formatOfficialUiMetric,
+} from "../src/services/official-ui-state.js";
+
+test("buildOfficialUiState classifies a visible failed connect page", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "connect",
+        type: "page",
+        title: "EasyConnect",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "无法连接 请检查网络后重试 继续",
+      },
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "hidden",
+        hidden: true,
+        bodyText: "资源搜索 默认资源组",
+      },
+    ],
+  });
+
+  assert.equal(state.primaryTarget.kind, "probe-failed");
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasBlockingVisibleTarget, true);
+  assert.equal(formatOfficialUiMetric(state), "探测失败");
+});
+
+test("describeOfficialUiConsistency warns when tunnel is online but official UI is blocked", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "connect",
+        type: "page",
+        title: "EasyConnect",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "无法连接",
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    {
+      title: "隧道在线，官方窗口异常",
+      detail: "底层 VPN 已在线，但 EasyConnect 前台仍停在探测失败页；刷新状态不能再等同于官方 UI 正常。",
+      variant: "warn",
+    },
+  );
+});
+
+test("buildOfficialUiState treats ecResize native alert as a blocking official UI state", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    nativeWindowState: {
+      ok: true,
+      visible: true,
+      windowCount: 1,
+      windowNames: ["Loading..."],
+      alerts: [
+        {
+          text: "ecResize response data error, errorcode:0, errormsg:onResizeWindow failed, winID is not exist",
+          buttons: ["OK"],
+        },
+      ],
+    },
+    targets: [
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "资源搜索 默认资源组",
+      },
+    ],
+  });
+
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasBlockingNativeAlert, true);
+  assert.equal(state.blockingNativeAlerts.length, 1);
+  assert.equal(formatOfficialUiMetric(state), "原生弹窗异常");
+  assert.deepEqual(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    {
+      title: "隧道在线，官方原生弹窗异常",
+      detail: "底层 VPN 已在线，但 EasyConnect 前台被原生错误弹窗阻塞；需要关闭该弹窗后再判定服务页是否稳定。",
+      variant: "warn",
+    },
+  );
+});
+
+test("buildOfficialUiState classifies connect_notfound as a blocking failed probe", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "connect-notfound",
+        type: "page",
+        title: "EasyConnect",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect_notfound/connect_notfound.html?from=https%3A%2F%2F198.51.100.20%3A9898%2Fportal%2F%23!%2Fservice",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "连接失败 可能部分公司内网无法访问 刷新",
+      },
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "hidden",
+        hidden: true,
+        bodyText: "资源搜索 默认资源组",
+      },
+    ],
+  });
+
+  assert.equal(state.primaryTarget.kind, "probe-failed");
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasBlockingVisibleTarget, true);
+  assert.equal(formatOfficialUiMetric(state), "探测失败");
+});
+
+test("buildOfficialUiState treats a visible connect page as blocking when only hidden service targets exist", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "hidden",
+        hidden: true,
+        bodyText: "资源搜索 默认资源组",
+      },
+      {
+        id: "connect",
+        type: "page",
+        title: "EasyConnect",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "",
+      },
+    ],
+  });
+
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasVisibleServiceTarget, false);
+  assert.equal(state.targets.find((target) => target.id === "connect").kind, "connect");
+  assert.equal(state.hasBlockingVisibleTarget, true);
+  assert.deepEqual(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    {
+      title: "隧道在线，官方窗口异常",
+      detail: "底层 VPN 已在线，但 EasyConnect 前台仍停在网关探测页；刷新状态不能再等同于官方 UI 正常。",
+      variant: "warn",
+    },
+  );
+});
+
+test("describeOfficialUiConsistency returns null when service page is the primary official UI", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "资源搜索 默认资源组",
+      },
+    ],
+  });
+
+  assert.equal(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    null,
+  );
+  assert.equal(formatOfficialUiMetric(state), "服务页");
+});
+
+test("vpn_openresource route counts as an official service page", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "open-resource",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/vpn_openresource",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "",
+      },
+    ],
+  });
+
+  assert.equal(state.primaryTarget.kind, "service");
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasVisibleServiceTarget, true);
+  assert.equal(state.hasBlockingVisibleTarget, false);
+  assert.equal(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    null,
+  );
+});
+
+test("buildOfficialUiState flags a visible service target with no native EasyConnect window", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    nativeWindowState: {
+      ok: true,
+      visible: true,
+      windowCount: 0,
+      windowNames: [],
+    },
+    targets: [
+      {
+        id: "open-resource",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/vpn_openresource",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "",
+      },
+    ],
+  });
+
+  assert.equal(state.primaryTarget.kind, "service");
+  assert.equal(state.hasVisibleServiceTarget, true);
+  assert.equal(state.needsNativeWindowRestore, true);
+  assert.deepEqual(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    {
+      title: "隧道在线，官方窗口已隐藏",
+      detail: "底层 VPN 已在线，官方服务页也存在，但 macOS 当前没有 EasyConnect 原生窗口；需要显式恢复窗口而不是误判为正常。",
+      variant: "warn",
+    },
+  );
+});
+
+test("buildOfficialUiState flags duplicate native EasyConnect windows", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    nativeWindowState: {
+      ok: true,
+      visible: true,
+      windowCount: 3,
+      windowNames: ["EasyConnect", "EasyConnect", "EasyConnect"],
+    },
+    targets: [
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "资源搜索 默认资源组",
+      },
+    ],
+  });
+
+  assert.equal(state.primaryTarget.kind, "service");
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasDuplicateNativeWindows, true);
+  assert.equal(state.needsNativeWindowConsolidation, true);
+  assert.equal(formatOfficialUiMetric(state), "多个官方窗口");
+  assert.deepEqual(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    {
+      title: "隧道在线，官方窗口重复",
+      detail: "底层 VPN 已在线，官方服务页也存在，但 macOS 当前有多个 EasyConnect 原生窗口；需要收敛为一个窗口，不能判定为稳定。",
+      variant: "warn",
+    },
+  );
+});
+
+test("buildOfficialUiState does not treat a connect page as blocking when a visible service page exists", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "资源搜索 默认资源组",
+      },
+      {
+        id: "connect",
+        type: "page",
+        title: "EasyConnect",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "",
+      },
+    ],
+  });
+
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasVisibleServiceTarget, true);
+  assert.equal(state.hasBlockingVisibleTarget, false);
+  assert.equal(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    null,
+  );
+});
+
+test("user setting page text does not count as a blocking login form", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "user-setting",
+        type: "page",
+        title: "个人设置",
+        url: "https://198.51.100.20:9898/portal/#!/user_setting_box",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "个人设置 修改密码 登录设备",
+      },
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "hidden",
+        hidden: true,
+        bodyText: "资源搜索 默认资源组",
+      },
+    ],
+  });
+
+  const userSetting = state.targets.find((target) => target.kind === "user-setting");
+
+  assert.equal(userSetting.signals.loginForm, false);
+  assert.equal(state.primaryTarget.kind, "service");
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasBlockingVisibleTarget, false);
+  assert.equal(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    null,
+  );
+});
+
+test("hidden service target remains primary when only auxiliary user-setting is visible", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "hidden",
+        hidden: true,
+        bodyText: "资源搜索 默认资源组",
+      },
+      {
+        id: "user-setting",
+        type: "page",
+        title: "个人设置",
+        url: "https://198.51.100.20:9898/portal/#!/user_setting_box",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "个人设置 修改密码",
+      },
+      {
+        id: "status",
+        type: "page",
+        title: "EasyConnect",
+        url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/vpn_status_manager/vpn_status_manager.html",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "当前登录状态 online",
+      },
+    ],
+  });
+
+  assert.equal(state.primaryTarget.kind, "service");
+  assert.equal(state.hasServiceTarget, true);
+  assert.equal(state.hasVisibleServiceTarget, false);
+  assert.equal(state.hasBlockingVisibleTarget, false);
+  assert.equal(formatOfficialUiMetric(state), "服务页");
+  assert.equal(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    null,
+  );
+});
+
+test("buildOfficialUiState treats a visible failed service page as blocked", () => {
+  const state = buildOfficialUiState({
+    reachable: true,
+    targets: [
+      {
+        id: "service",
+        type: "page",
+        title: "EasyConnect",
+        url: "https://198.51.100.20:9898/portal/#!/service",
+        visibilityState: "visible",
+        hidden: false,
+        bodyText: "加载失败 请尝试刷新后重试",
+      },
+    ],
+  });
+
+  assert.equal(state.primaryTarget.kind, "service-failed");
+  assert.equal(state.hasServiceTarget, false);
+  assert.equal(state.hasBlockingVisibleTarget, true);
+  assert.equal(formatOfficialUiMetric(state), "服务页异常");
+  assert.deepEqual(
+    describeOfficialUiConsistency({
+      loginStatus: { status: "1" },
+      officialUi: state,
+    }),
+    {
+      title: "隧道在线，官方服务页加载失败",
+      detail: "底层 VPN 可能已在线，但 EasyConnect 服务页资源配置加载失败；需要重新同步并刷新服务页。",
+      variant: "warn",
+    },
+  );
+});
