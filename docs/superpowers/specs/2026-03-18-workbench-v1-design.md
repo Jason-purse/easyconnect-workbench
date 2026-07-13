@@ -1,5 +1,7 @@
 # EasyConnect Workbench V1 Design
 
+> Superseded on 2026-07-10 by [EasyConnect Workbench VPN-only 重构设计](./2026-07-10-easyconnect-vpn-only-redesign.md). This file is retained only as historical context for the pre-refocus product.
+
 日期：2026-03-18
 
 状态：已与用户对齐，待进入实现计划

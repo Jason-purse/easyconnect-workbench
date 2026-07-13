@@ -1,18 +1,18 @@
 # EasyConnect Workbench
 
-EasyConnect Workbench is a local Electron helper for macOS users who need a clearer, more reliable control surface around an already-installed Sangfor EasyConnect VPN client.
+EasyConnect Workbench is a focused macOS companion for one job: automatically restoring an authorized EasyConnect connection and keeping it healthy without turning the desktop into an operations console.
 
-It does not include EasyConnect, does not replace EasyConnect, and does not bypass authentication. It launches and observes the official local client, keeps the VPN session alive when possible, and explains recovery failures in a way that is easier to act on than the default client UI.
+It does not include or replace EasyConnect, and it does not bypass authentication. It drives the already-installed official client, keeps recovery inside configured hours, lives quietly in the tray, and presents the current connection state and next action in one compact window.
 
 ## What It Does
 
-- Stores local VPN settings: username, password, gateway list, debug port, and EasyConnect executable path.
-- Starts the official EasyConnect client from the Workbench UI.
-- Restores a VPN session through the official renderer/API bridge, with backend session grafting only as a fallback.
-- Keeps a background maintainer running from the tray: lightweight online checks when connected, recovery attempts when offline.
-- Repairs visible official-client UI drift when the VPN is already online but the EasyConnect window is stuck on a loading, login, or gateway page.
-- Shows human-readable status for common failure modes such as unreachable gateways, captcha-required login, local service not ready, private-kick logout, or inconsistent official UI state.
-- Packages as a macOS `.app` without bundling the official EasyConnect runtime.
+- Automatically logs in and restores the VPN through the installed official EasyConnect client.
+- Keeps the connection alive with lightweight checks and controlled recovery attempts.
+- Respects configurable quiet hours, including the default `18:30-09:00` overnight pause.
+- Lives in the macOS tray and shows the current connection, maintainer, gateway, session, and service state.
+- Keeps account, gateway, launch-at-login, interval, and diagnostic settings local to this machine.
+- Explains recoverable failures and keeps raw recovery data behind an advanced diagnostic section.
+- Packages and verifies as a macOS `.app` without bundling the official EasyConnect runtime.
 
 ## Intended Use
 
@@ -34,6 +34,7 @@ Do not use it against systems you are not authorized to access. Do not publish y
 
 ```bash
 npm install
+npm run build:css
 npm test
 npm start
 ```
@@ -64,7 +65,7 @@ The `.noindex` suffix keeps macOS Spotlight from showing the local build output 
 EASYCONNECT_VERIFY_GATEWAYS="vpn.example.com:9898" npm run verify:mvp-installed
 ```
 
-This command can stop and restart the installed Workbench app while verifying lifecycle, packaging, hidden startup, VPN recovery, and CPU behavior.
+This command can stop and restart the installed Workbench app while verifying lifecycle, packaging, hidden startup, controlled VPN recovery, configuration safety, and idle CPU behavior. Run it only when temporarily disconnecting the current VPN is acceptable.
 
 ## Configuration Notes
 
@@ -74,7 +75,7 @@ Workbench stores its local config under the app's user data directory, for examp
 ~/Library/Application Support/easyconnect-workbench/config.json
 ```
 
-The current MVP stores the VPN password in local JSON. That is acceptable for a small personal utility, but you should protect the machine and never commit this file.
+The current app stores the VPN password in local JSON. Protect the machine and never commit or share this file.
 
 Gateway examples in tests and docs use documentation-only addresses such as `203.0.113.10` and `198.51.100.20`. Replace them with your own authorized gateway inside the app UI or local config.
 
@@ -82,7 +83,7 @@ Gateway examples in tests and docs use documentation-only addresses such as `203
 
 This repository is an open-source workbench around a locally installed official client. It is not a VPN implementation, a credential bypass, or a redistributed EasyConnect runtime.
 
-The project exists to make a fragile operational workflow observable and recoverable: status inspection, controlled launch, session recovery, keepalive, user-facing diagnosis, and local packaging.
+The product boundary is deliberately narrow: automatic login, connection recovery, keepalive, quiet hours, tray residency, local settings, and user-facing diagnosis. Build, release, publishing, and unrelated platform aggregation are not product responsibilities.
 
 ## License
 
