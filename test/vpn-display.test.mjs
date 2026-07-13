@@ -11,6 +11,7 @@ import {
   formatMaintainerLastError,
   formatRecoveryPlan,
   formatSessionId,
+  sanitizeDiagnosticTextForDisplay,
   sanitizeDiagnosticValueForDisplay,
   sanitizeEnvironmentInfoForDisplay,
   sanitizeMaintainerStatusForDisplay,
@@ -94,6 +95,33 @@ test("sanitizeDiagnosticValueForDisplay redacts credentials embedded as JSON tex
   for (const secret of ["twf-secret", "session-secret", "token-secret", "socket-secret"]) {
     assert.equal(serialized.includes(secret), false, `${secret} must be redacted`);
   }
+});
+
+test("sanitizeDiagnosticTextForDisplay redacts credentials in backslash-escaped JSON", () => {
+  const secrets = {
+    twfid: "escaped-twfid-privacy-case",
+    sessionId: "escaped-session-privacy-case",
+    token: "escaped-token-privacy-case",
+    cookie: "escaped-cookie-privacy-case",
+    password: "escaped-password-privacy-case",
+    secret: "escaped-secret-privacy-case",
+    webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/escaped-websocket-privacy-case",
+  };
+  const diagnostic = String.raw`\{\\\"twfid\\\":\\\"${secrets.twfid}\\\",\\\"sessionId\\\":\\\"${secrets.sessionId}\\\",\\\"token\\\":\\\"${secrets.token}\\\",\\\"cookie\\\":\\\"${secrets.cookie}\\\",\\\"password\\\":\\\"${secrets.password}\\\",\\\"secret\\\":\\\"${secrets.secret}\\\",\\\"webSocketDebuggerUrl\\\":\\\"${secrets.webSocketDebuggerUrl}\\\"\}`;
+  const sanitized = sanitizeDiagnosticTextForDisplay(diagnostic);
+
+  for (const secret of Object.values(secrets)) {
+    assert.equal(sanitized.includes(secret), false, `${secret} must be redacted`);
+  }
+});
+
+test("sanitizeDiagnosticTextForDisplay redacts raw DevTools WebSocket URLs", () => {
+  const pageId = "raw-devtools-page-privacy-case";
+  const diagnostic = `DevTools target: wss://127.0.0.1:9443/devtools/page/${pageId}`;
+  const sanitized = sanitizeDiagnosticTextForDisplay(diagnostic);
+
+  assert.equal(sanitized.includes(pageId), false);
+  assert.doesNotMatch(sanitized, /wss?:\/\//i);
 });
 
 test("display status sanitizers redact credentials embedded in error strings", () => {

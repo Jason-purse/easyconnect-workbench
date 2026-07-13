@@ -54,6 +54,20 @@ test("settings drawer is modal and keeps save feedback inside the drawer", async
   assert.doesNotMatch(saveConfigSource, /closeSettings/);
 });
 
+test("project owns an executable browser keyboard QA command", async () => {
+  const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+  assert.equal(
+    packageJson.scripts?.["qa:renderer-keyboard"],
+    "node scripts/qa-renderer-keyboard.mjs",
+  );
+
+  const source = await readFile("scripts/qa-renderer-keyboard.mjs", "utf8");
+  assert.match(source, /\/Users\/jasonj\/\.codex\/bin\/playwright-cli/);
+  assert.match(source, /easyconnect-vpn-only-keyboard-qa/);
+  assert.match(source, /page\.keyboard\.press/);
+  assert.match(source, /server\.close/);
+});
+
 test("tray start and dynamic diagnostics cannot bypass shared guards", async () => {
   const mainSource = await readFile("src/main.js", "utf8");
   const rendererSource = await readFile("src/renderer/app.js", "utf8");

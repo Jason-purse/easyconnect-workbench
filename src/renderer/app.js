@@ -24,6 +24,7 @@ import {
   deriveMaintainerView,
   describeMaintainerStartResult,
 } from "./view-state.js";
+import { createLatestRequestCoordinator } from "./refresh-coordinator.js";
 import { persistSettingsAndRefresh } from "./settings-workflow.js";
 
 const MAX_ACTIVITY_ENTRIES = 50;
@@ -31,6 +32,7 @@ const RECENT_ACTIVITY_ENTRIES = 4;
 const MAINTAINER_REFRESH_INTERVAL_MS = 3000;
 const QUIET_REFRESH_INTERVAL_MS = 30000;
 const $ = (id) => document.getElementById(id);
+const runLatestRefresh = createLatestRequestCoordinator();
 
 const elements = {
   appShell: document.querySelector(".app-shell"),
@@ -89,6 +91,8 @@ let maintainerRefreshInFlight = false;
 let lastEnvironmentInfo = null;
 let lastSettingsFocus = null;
 let lastMaintainerEventAt = null;
+let lastMaintainerCycleCount = null;
+let lastMaintainerStartedAt = null;
 let activityEntries = [];
 
 function safeStringify(value) {
@@ -435,9 +439,13 @@ function renderMaintainerStatus(config, maintainerStatus) {
   const activity = deriveMaintainerActivity({
     maintainerStatus,
     previousEventAt: lastMaintainerEventAt,
+    previousCycleCount: lastMaintainerCycleCount,
+    previousStartedAt: lastMaintainerStartedAt,
   });
   if (activity) {
     lastMaintainerEventAt = activity.eventAt;
+    lastMaintainerCycleCount = activity.cycleCount;
+    lastMaintainerStartedAt = activity.startedAt;
     appendActivity(activity.title, activity.detail, activity.tone, activity.timestamp);
   }
   return maintainerView;
@@ -542,43 +550,49 @@ async function withAction(title, action) {
 }
 
 async function refreshStatus(options = {}) {
-  const currentConfig = collectConfig();
-  const { status, environmentInfo } = await withTimeout(
-    window.workbench.getVpnSnapshot({
-      config: currentConfig,
-      audit: options.audit ?? false,
-      auditTrigger: options.auditTrigger ?? "manual-refresh",
-    }),
-    20000,
-    "getVpnSnapshot",
-  );
-  const [storedConfig, maintainerStatus] = await Promise.all([
-    withTimeout(window.workbench.getConfig(), 5000, "getConfig"),
-    withTimeout(window.workbench.getMaintainerStatus(), 5000, "getMaintainerStatus"),
-  ]);
-  const renderConfig = mergeConfigForRender(currentConfig, storedConfig);
-  const displayEnvironmentInfo = sanitizeEnvironmentInfoForDisplay(environmentInfo, renderConfig);
-  const recoveryPlan = await withTimeout(
-    window.workbench.getRecoveryPlan({
-      config: renderConfig,
-      gatewayCandidates: displayEnvironmentInfo?.gatewayCandidates ?? [],
-    }),
-    10000,
-    "getRecoveryPlan",
-  );
+  return runLatestRefresh(
+    async () => {
+      const currentConfig = collectConfig();
+      const { status, environmentInfo } = await withTimeout(
+        window.workbench.getVpnSnapshot({
+          config: currentConfig,
+          audit: options.audit ?? false,
+          auditTrigger: options.auditTrigger ?? "manual-refresh",
+        }),
+        20000,
+        "getVpnSnapshot",
+      );
+      const [storedConfig, maintainerStatus] = await Promise.all([
+        withTimeout(window.workbench.getConfig(), 5000, "getConfig"),
+        withTimeout(window.workbench.getMaintainerStatus(), 5000, "getMaintainerStatus"),
+      ]);
+      const renderConfig = mergeConfigForRender(currentConfig, storedConfig);
+      const displayEnvironmentInfo = sanitizeEnvironmentInfoForDisplay(environmentInfo, renderConfig);
+      const recoveryPlan = await withTimeout(
+        window.workbench.getRecoveryPlan({
+          config: renderConfig,
+          gatewayCandidates: displayEnvironmentInfo?.gatewayCandidates ?? [],
+        }),
+        10000,
+        "getRecoveryPlan",
+      );
 
-  renderStatus(status, displayEnvironmentInfo, renderConfig, maintainerStatus);
-  renderRecoveryPlan(recoveryPlan);
-  if (!options.silent) {
-    appendActivity("连接状态已更新", "本地运行态与守护状态已同步。", "neutral");
-  }
-  return {
-    config: renderConfig,
-    status,
-    environmentInfo: displayEnvironmentInfo,
-    maintainerStatus,
-    recoveryPlan,
-  };
+      return {
+        config: renderConfig,
+        status,
+        environmentInfo: displayEnvironmentInfo,
+        maintainerStatus,
+        recoveryPlan,
+      };
+    },
+    (result) => {
+      renderStatus(result.status, result.environmentInfo, result.config, result.maintainerStatus);
+      renderRecoveryPlan(result.recoveryPlan);
+      if (!options.silent) {
+        appendActivity("连接状态已更新", "本地运行态与守护状态已同步。", "neutral");
+      }
+    },
+  );
 }
 
 async function saveConfig() {

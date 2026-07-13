@@ -22,10 +22,14 @@ export function formatSessionId(sessionId) {
 export function sanitizeDiagnosticTextForDisplay(value = "") {
   return `${value}`
     .replace(
-      /("(?:twfid|token|session(?:id)?|cookie|password|secret|websocketdebuggerurl)"\s*:\s*")[^"]*(")/gi,
+      /((?:\\*")(?:twfid|token|session(?:id)?|cookie|password|secret|websocketdebuggerurl)(?:\\*")\s*:\s*(?:\\*"))[^"]*?(\\*")/gi,
       "$1<redacted>$2",
     )
-    .replace(/((?:twfid|token|session(?:id)?|cookie)=)[^&\s]+/gi, "$1<redacted>")
+    .replace(
+      /((?:twfid|token|session(?:id)?|cookie|password|secret|websocketdebuggerurl)=)[^&\s]+/gi,
+      "$1<redacted>",
+    )
+    .replace(/\bwss?:\/\/[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+/gi, "<redacted-websocket-url>")
     .replace(/\b[a-fA-F0-9]{16,64}\b/g, "<hex>");
 }
 

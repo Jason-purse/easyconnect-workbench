@@ -167,6 +167,54 @@ test("deriveMaintainerActivity redacts credentials from failure details", () => 
   assert.equal(activity.detail.includes(secret), false);
 });
 
+test("deriveMaintainerActivity ignores lower cycle versions and older event times", () => {
+  const previousEventAt = "2026-07-13T02:00:00.000Z";
+  const previousCycleCount = 10;
+
+  assert.equal(
+    deriveMaintainerActivity({
+      maintainerStatus: {
+        cycleCount: 9,
+        lastEventAt: "2026-07-13T02:01:00.000Z",
+        lastEvent: { ok: true, result: { action: "already-online" } },
+      },
+      previousEventAt,
+      previousCycleCount,
+    }),
+    null,
+  );
+
+  assert.equal(
+    deriveMaintainerActivity({
+      maintainerStatus: {
+        cycleCount: 11,
+        lastEventAt: "2026-07-13T01:59:00.000Z",
+        lastEvent: { ok: true, result: { action: "already-online" } },
+      },
+      previousEventAt,
+      previousCycleCount,
+    }),
+    null,
+  );
+});
+
+test("deriveMaintainerActivity accepts a lower cycle after a newer maintainer start", () => {
+  const activity = deriveMaintainerActivity({
+    maintainerStatus: {
+      startedAt: "2026-07-13T02:05:00.000Z",
+      cycleCount: 1,
+      lastEventAt: "2026-07-13T02:06:00.000Z",
+      lastEvent: { ok: true, result: { action: "already-online" } },
+    },
+    previousStartedAt: "2026-07-13T01:00:00.000Z",
+    previousCycleCount: 10,
+    previousEventAt: "2026-07-13T02:00:00.000Z",
+  });
+
+  assert.equal(activity?.cycleCount, 1);
+  assert.equal(activity?.startedAt, "2026-07-13T02:05:00.000Z");
+});
+
 test("suppressed maintainer starts are presented as quiet hours instead of success", () => {
   assert.deepEqual(
     describeMaintainerStartResult({

@@ -151,15 +151,41 @@ export function deriveMaintainerView({ config = {}, maintainerStatus = {} } = {}
   };
 }
 
-export function deriveMaintainerActivity({ maintainerStatus = {}, previousEventAt = null } = {}) {
+export function deriveMaintainerActivity({
+  maintainerStatus = {},
+  previousEventAt = null,
+  previousCycleCount = null,
+  previousStartedAt = null,
+} = {}) {
   const eventAt = maintainerStatus?.lastEventAt ?? null;
-  if (!eventAt || !maintainerStatus?.lastEvent || eventAt === previousEventAt) {
+  const startedAt = maintainerStatus?.startedAt ?? null;
+  const cycleCount = Number.isSafeInteger(maintainerStatus?.cycleCount)
+    ? maintainerStatus.cycleCount
+    : null;
+  const previousVersion = Number.isSafeInteger(previousCycleCount) ? previousCycleCount : null;
+  const eventTime = Date.parse(eventAt);
+  const previousEventTime = Date.parse(previousEventAt);
+  const startedTime = Date.parse(startedAt);
+  const previousStartedTime = Date.parse(previousStartedAt);
+  const hasComparableStarts = Number.isFinite(startedTime) && Number.isFinite(previousStartedTime);
+  const isNewerRun = hasComparableStarts && startedTime > previousStartedTime;
+  const hasStaleRun = hasComparableStarts && startedTime < previousStartedTime;
+  const hasStaleCycle =
+    !isNewerRun && cycleCount !== null && previousVersion !== null && cycleCount <= previousVersion;
+  const hasStaleTime =
+    Number.isFinite(eventTime) &&
+    Number.isFinite(previousEventTime) &&
+    eventTime <= previousEventTime;
+
+  if (!eventAt || !maintainerStatus?.lastEvent || hasStaleRun || hasStaleCycle || hasStaleTime) {
     return null;
   }
 
   const summary = describeMaintainerEvent(maintainerStatus.lastEvent);
   return {
+    cycleCount,
     eventAt,
+    startedAt,
     timestamp: eventAt,
     title: summary.title,
     detail: sanitizeDiagnosticTextForDisplay(summary.detail),
