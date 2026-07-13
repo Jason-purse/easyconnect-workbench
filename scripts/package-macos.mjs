@@ -12,6 +12,7 @@ const appExecutableName = "EasyConnect Workbench";
 const appBundle = path.join(distDir, appName);
 const resourcesDir = path.join(appBundle, "Contents", "Resources");
 const bundledWorkbenchDir = path.join(resourcesDir, "app");
+const lucideSourceDir = path.join(projectRoot, "node_modules", "lucide");
 
 async function assertExists(target, message) {
   try {
@@ -39,6 +40,20 @@ async function copyAppPayload() {
   await cp(path.join(projectRoot, "src"), path.join(bundledWorkbenchDir, "src"), {
     recursive: true,
   });
+  await copyLucideRuntime();
+}
+
+async function copyLucideRuntime() {
+  const targetDir = path.join(bundledWorkbenchDir, "node_modules", "lucide");
+  const targetUmdDir = path.join(targetDir, "dist", "umd");
+  const sourceScript = path.join(lucideSourceDir, "dist", "umd", "lucide.js");
+  const sourceLicense = path.join(lucideSourceDir, "LICENSE");
+
+  await assertExists(sourceScript, "Lucide UMD runtime is missing; run npm install first");
+  await assertExists(sourceLicense, "Lucide license is missing; run npm install first");
+  await mkdir(targetUmdDir, { recursive: true });
+  await cp(sourceScript, path.join(targetUmdDir, "lucide.js"));
+  await cp(sourceLicense, path.join(targetDir, "LICENSE"));
 }
 
 async function updateBundlePlist() {

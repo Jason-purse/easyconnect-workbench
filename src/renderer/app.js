@@ -88,7 +88,14 @@ function setNodeText(node, value) {
 
 function refreshIcons() {
   if (window.lucide?.createIcons) {
-    window.lucide.createIcons();
+    window.lucide.createIcons({
+      attrs: {
+        width: 18,
+        height: 18,
+        "stroke-width": 1.8,
+        "aria-hidden": "true",
+      },
+    });
   }
 }
 
@@ -205,6 +212,7 @@ function renderView(view) {
 
 function openSettings() {
   lastSettingsFocus = document.activeElement;
+  elements.settingsDrawer?.removeAttribute("inert");
   elements.settingsDrawer?.classList.add("is-open");
   elements.settingsDrawer?.setAttribute("aria-hidden", "false");
   elements.settingsBackdrop?.classList.remove("is-hidden");
@@ -213,6 +221,7 @@ function openSettings() {
 }
 
 function closeSettings() {
+  elements.settingsDrawer?.setAttribute("inert", "");
   elements.settingsDrawer?.classList.remove("is-open");
   elements.settingsDrawer?.setAttribute("aria-hidden", "true");
   elements.settingsBackdrop?.classList.add("is-hidden");

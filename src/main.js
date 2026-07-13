@@ -634,12 +634,12 @@ function createWindow() {
   }
 
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 1080,
-    minHeight: 760,
+    width: 1040,
+    height: 720,
+    minWidth: 900,
+    minHeight: 640,
     title: "EasyConnect Workbench",
-    backgroundColor: "#f4efe6",
+    backgroundColor: "#eef1ef",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

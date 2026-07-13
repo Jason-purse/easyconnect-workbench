@@ -26,7 +26,8 @@
     "dev": "npm run build:css && electron ."
   },
   "dependencies": {
-    "electron": "^35.0.0"
+    "electron": "^35.0.0",
+    "lucide": "1.24.0"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.2.1",

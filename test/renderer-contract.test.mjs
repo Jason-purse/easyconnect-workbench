@@ -20,6 +20,7 @@ const requiredIds = [
 
 test("renderer exposes the VPN-only status-center structure", async () => {
   const html = await readFile("src/renderer/index.html", "utf8");
+  assert.match(html, /<link[^>]+rel=["']icon["'][^>]+href=["']data:/, "missing inline favicon");
   for (const id of requiredIds) {
     assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
   }
@@ -32,4 +33,16 @@ test("renderer behavior has no toast overlay or renderer-owned autostart", async
   assert.doesNotMatch(source, /自动守护自启动/);
   assert.match(source, /deriveConnectionView/);
   assert.match(source, /deriveMaintainerView/);
+  assert.match(source, /removeAttribute\(["']inert["']\)/);
+  assert.match(source, /setAttribute\(["']inert["']/);
+});
+
+test("visual source avoids disallowed decorative patterns", async () => {
+  const css = await readFile("src/renderer/tailwind.css", "utf8");
+  assert.doesNotMatch(css, /gradient/i);
+  assert.doesNotMatch(css, /letter-spacing:\s*-/i);
+  assert.doesNotMatch(css, /border-radius:\s*(?:[1-9][0-9]|[1-9][0-9]{2,})px/i);
+  assert.match(css, /--color-online:/);
+  assert.match(css, /--color-warning:/);
+  assert.match(css, /--color-danger:/);
 });
