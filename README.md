@@ -40,7 +40,7 @@ npm run qa:renderer-keyboard
 npm start
 ```
 
-`qa:renderer-keyboard` serves the real renderer on a temporary loopback port and drives it with the pinned Playwright CLI against a fully stubbed `window.workbench`. It verifies the settings drawer's focus trap, Escape focus restoration, and Enter submission without starting Electron, EasyConnect, or any VPN operation.
+`qa:renderer-keyboard` serves the real renderer on a temporary loopback port and drives it with a discovered Playwright CLI against a fully stubbed `window.workbench`. It checks `PLAYWRIGHT_CLI`, `CODEX_HOME`, `~/.codex/bin`, then `PATH`. The QA covers keyboard behavior and sanitized activity details without starting Electron, EasyConnect, or any VPN operation.
 
 ## Packaging
 

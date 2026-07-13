@@ -48,3 +48,23 @@ test("renderer refresh coordinator lets only the newest request commit", async (
   assert.equal(await resultA, "request-a");
   assert.deepEqual(commits, ["request-b"]);
 });
+
+test("renderer refresh coordinator invalidates a background request before manual recovery", async () => {
+  const { createLatestRequestCoordinator } = await import(
+    "../src/renderer/refresh-coordinator.js"
+  );
+  const runLatest = createLatestRequestCoordinator();
+  const background = createDeferred();
+  const manual = createDeferred();
+  const commits = [];
+
+  const backgroundResult = runLatest(() => background.promise, (value) => commits.push(value));
+  runLatest.invalidate();
+  const manualResult = runLatest(() => manual.promise, (value) => commits.push(value));
+
+  manual.resolve("manual-recovery");
+  assert.equal(await manualResult, "manual-recovery");
+  background.resolve("background-snapshot");
+  assert.equal(await backgroundResult, "background-snapshot");
+  assert.deepEqual(commits, ["manual-recovery"]);
+});

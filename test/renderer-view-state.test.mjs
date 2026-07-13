@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   deriveConnectionView,
   deriveMaintainerActivity,
+  deriveMaintainerSchedule,
   deriveMaintainerView,
   describeMaintainerStartResult,
 } from "../src/renderer/view-state.js";
@@ -259,4 +260,88 @@ test("maintainer view distinguishes running, quiet, and stopped", () => {
     null,
   );
   assert.equal(deriveMaintainerView({ maintainerStatus: { running: false } }).state, "stopped");
+});
+
+test("deriveMaintainerSchedule calculates the next running check from the last event", () => {
+  const lastEventAt = "2026-07-13T02:00:00.000Z";
+  assert.deepEqual(
+    deriveMaintainerSchedule({
+      config: { vpn: { maintainerIntervalSeconds: 300 } },
+      maintainerStatus: {
+        running: true,
+        intervalSeconds: 300,
+        lastEventAt,
+        lastEvent: { ok: true },
+      },
+      nowMs: Date.parse("2026-07-13T02:02:00.000Z"),
+    }),
+    {
+      state: "running",
+      intervalSeconds: 300,
+      lastCheckAt: lastEventAt,
+      nextCheckAt: "2026-07-13T02:05:00.000Z",
+      resumeAt: null,
+      currentCheckRunning: false,
+    },
+  );
+});
+
+test("deriveMaintainerSchedule uses start time while the first check is pending", () => {
+  assert.equal(
+    deriveMaintainerSchedule({
+      config: { vpn: { maintainerIntervalSeconds: 120 } },
+      maintainerStatus: {
+        running: true,
+        startedAt: "2026-07-13T02:00:00.000Z",
+        currentPhase: "official-renderer-login",
+      },
+      nowMs: Date.parse("2026-07-13T02:00:10.000Z"),
+    }).currentCheckRunning,
+    true,
+  );
+});
+
+test("deriveMaintainerSchedule keeps authoritative quiet-hours resume data", () => {
+  assert.deepEqual(
+    deriveMaintainerSchedule({
+      config: { vpn: { maintainerIntervalSeconds: 300 } },
+      maintainerStatus: {
+        running: true,
+        intervalSeconds: 300,
+        lastEventAt: "2026-07-13T02:00:00.000Z",
+        quietHours: {
+          active: true,
+          nextIntervalMs: 60000,
+          resumeAt: "2026-07-13 09:00:00",
+        },
+      },
+      nowMs: Date.parse("2026-07-13T02:30:00.000Z"),
+    }),
+    {
+      state: "quiet",
+      intervalSeconds: 300,
+      lastCheckAt: "2026-07-13T02:00:00.000Z",
+      nextCheckAt: null,
+      resumeAt: "2026-07-13 09:00:00",
+      currentCheckRunning: false,
+    },
+  );
+});
+
+test("deriveMaintainerSchedule displays stopped or unavailable timing as dashes", () => {
+  assert.deepEqual(
+    deriveMaintainerSchedule({
+      config: { vpn: { maintainerIntervalSeconds: 300 } },
+      maintainerStatus: { running: false },
+      nowMs: Date.parse("2026-07-13T02:00:00.000Z"),
+    }),
+    {
+      state: "stopped",
+      intervalSeconds: null,
+      lastCheckAt: null,
+      nextCheckAt: null,
+      resumeAt: null,
+      currentCheckRunning: false,
+    },
+  );
 });

@@ -11,6 +11,9 @@ const requiredIds = [
   "close-settings",
   "connection-primary-action",
   "maintainer-action",
+  "metric-maintainer-interval",
+  "metric-maintainer-last-check",
+  "metric-maintainer-next-check",
   "recent-activity-list",
   "activity-list",
   "action-notice",
@@ -62,7 +65,12 @@ test("project owns an executable browser keyboard QA command", async () => {
   );
 
   const source = await readFile("scripts/qa-renderer-keyboard.mjs", "utf8");
-  assert.match(source, /\/Users\/jasonj\/\.codex\/bin\/playwright-cli/);
+  assert.doesNotMatch(source, /\/Users\/jasonj\/\.codex\/bin\/playwright-cli/);
+  assert.doesNotMatch(source, /v24\.14\.0/);
+  assert.match(source, /PLAYWRIGHT_CLI/);
+  assert.match(source, /CODEX_HOME/);
+  assert.match(source, /homedir\(\)/);
+  assert.match(source, /dirname\(process\.execPath\)/);
   assert.match(source, /easyconnect-vpn-only-keyboard-qa/);
   assert.match(source, /page\.keyboard\.press/);
   assert.match(source, /server\.close/);
@@ -85,6 +93,30 @@ test("tray start and dynamic diagnostics cannot bypass shared guards", async () 
     rendererSource,
     /setNodeText\(elements\.diagnosticResult,\s*safeStringify\(result\)\)/,
   );
+});
+
+test("renderer routes every window IPC call through the focused action runner", async () => {
+  const source = await readFile("src/renderer/app.js", "utf8");
+  assert.match(source, /runIpcAction/);
+  assert.doesNotMatch(source, /function withTimeout/);
+  for (const operation of [
+    "getVpnSnapshot",
+    "getConfig",
+    "getMaintainerStatus",
+    "getRecoveryPlan",
+    "saveConfig",
+    "launchOfficialClient",
+    "recoverAndLogin",
+    "repairOfficialUi",
+    "getDebugTargets",
+    "probeRecoveryPlan",
+    "startMaintainer",
+    "stopMaintainer",
+    "openLogsDir",
+    "openConfigDir",
+  ]) {
+    assert.match(source, new RegExp(`runIpcAction\\([\\s\\S]{0,260}window\\.workbench\\.${operation}`), operation);
+  }
 });
 
 test("visual source avoids disallowed decorative patterns", async () => {

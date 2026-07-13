@@ -4,6 +4,7 @@ import { app, BrowserWindow, ipcMain, shell, Menu, nativeImage, Tray } from "ele
 import { ConfigStore } from "./services/config-store.js";
 import { VpnService } from "./services/vpn-service.js";
 import { VpnMaintainer } from "./services/vpn-maintainer.js";
+import { createVpnActionGuard } from "./services/vpn-action-guard.js";
 import { runOfficialUiRepairSmoke } from "./services/vpn-official-ui-repair-smoke.js";
 import { applyGatewaySelectionHint, applyProbeHints, applySnapshotHints } from "./services/vpn-config-hints.js";
 import { mergeConfigForRender } from "./services/vpn-render-config.js";
@@ -26,6 +27,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TRAY_REFRESH_INTERVAL_MS = 15000;
+const vpnActionGuard = createVpnActionGuard();
 
 let mainWindow = null;
 let appTray = null;
@@ -517,12 +519,22 @@ function runTrayAction(action) {
     });
 }
 
+function runVpnAction(key, operation) {
+  return vpnActionGuard.run(key, operation);
+}
+
 async function startMaintainerFromTray() {
-  const config = await configStore.load();
-  return startMaintainerWithQuietHoursGuard({
-    config,
-    vpnMaintainer,
+  return runVpnAction("maintainer-start", async () => {
+    const config = await configStore.load();
+    return startMaintainerWithQuietHoursGuard({
+      config,
+      vpnMaintainer,
+    });
   });
+}
+
+function stopMaintainerFromTray() {
+  return runVpnAction("maintainer-stop", () => vpnMaintainer.stop());
 }
 
 function updateTrayMenu() {
@@ -581,7 +593,7 @@ function updateTrayMenu() {
       {
         label: "停止 VPN 守护",
         enabled: labels.canStop,
-        click: () => runTrayAction(() => vpnMaintainer.stop()),
+        click: () => runTrayAction(stopMaintainerFromTray),
       },
       {
         label: "刷新托盘状态",
@@ -752,16 +764,20 @@ function registerIpc() {
 
   ipcMain.handle("vpn:launch-user", async (_event, payload = {}) => {
     const nextPayload = typeof payload === "number" ? { remoteDebugPort: payload } : payload;
-    return vpnService.launchOfficialClient(await resolveConfig(nextPayload), {
-      remoteDebugPort: nextPayload.remoteDebugPort ?? null,
-    });
+    return runVpnAction("launch-official-client", async () =>
+      vpnService.launchOfficialClient(await resolveConfig(nextPayload), {
+        remoteDebugPort: nextPayload.remoteDebugPort ?? null,
+      }),
+    );
   });
 
   ipcMain.handle("vpn:recover-user", async (_event, payload = {}) => {
     const nextPayload = typeof payload === "number" ? { remoteDebugPort: payload } : payload;
-    return vpnService.recoverOfficialClient(await resolveConfig(nextPayload), {
-      remoteDebugPort: nextPayload.remoteDebugPort ?? null,
-    });
+    return runVpnAction("recover-official-client", async () =>
+      vpnService.recoverOfficialClient(await resolveConfig(nextPayload), {
+        remoteDebugPort: nextPayload.remoteDebugPort ?? null,
+      }),
+    );
   });
 
   ipcMain.handle("vpn:debug-targets", async (_event, payload = {}) =>
@@ -769,89 +785,95 @@ function registerIpc() {
   );
 
   ipcMain.handle("vpn:portal-login", async (_event, payload = {}) =>
-    vpnService.portalLogin(
-      await resolveConfig(payload),
-      payload.username ?? "",
-      payload.password ?? "",
-      payload.remoteDebugPort ?? 9222,
-    ),
-  );
-
-  ipcMain.handle("vpn:recover-login", async (_event, payload = {}) => {
-    const config = await resolveConfig(payload);
-    await writeAppEvent("manual-recover-login-started", {
-      gatewayCandidates: payload.gatewayCandidates ?? [],
-      remoteDebugPort: payload.remoteDebugPort ?? 9222,
-    });
-
-    let result = null;
-    try {
-      result = await vpnService.recoverAndLogin(
-        config,
+    runVpnAction("portal-login", async () =>
+      vpnService.portalLogin(
+        await resolveConfig(payload),
         payload.username ?? "",
         payload.password ?? "",
         payload.remoteDebugPort ?? 9222,
-        payload.gatewayCandidates ?? [],
-      );
-    } catch (error) {
-      await writeAppEvent("manual-recover-login-failed", {
-        error: error?.message ?? String(error),
-        code: error?.code,
-        gatewayAttempts: error?.gatewayAttempts,
+      ),
+    ),
+  );
+
+  ipcMain.handle("vpn:recover-login", async (_event, payload = {}) =>
+    runVpnAction("recover-login", async () => {
+      const config = await resolveConfig(payload);
+      await writeAppEvent("manual-recover-login-started", {
+        gatewayCandidates: payload.gatewayCandidates ?? [],
+        remoteDebugPort: payload.remoteDebugPort ?? 9222,
       });
-      throw error;
-    }
 
-    if (result.gateway?.host && result.gateway?.port) {
-      const hintedConfig = applyGatewaySelectionHint(config, result.gateway);
-      if (hintedConfig !== config) {
-        await configStore.save(hintedConfig);
+      let result = null;
+      try {
+        result = await vpnService.recoverAndLogin(
+          config,
+          payload.username ?? "",
+          payload.password ?? "",
+          payload.remoteDebugPort ?? 9222,
+          payload.gatewayCandidates ?? [],
+        );
+      } catch (error) {
+        await writeAppEvent("manual-recover-login-failed", {
+          error: error?.message ?? String(error),
+          code: error?.code,
+          gatewayAttempts: error?.gatewayAttempts,
+        });
+        throw error;
       }
-    }
 
-    await writeAppEvent("manual-recover-login-completed", {
-      action: result.action ?? result.mode ?? null,
-      gateway: result.gateway ?? null,
-      gatewayAttempts: result.gatewayAttempts ?? [],
-      loginStatus: (result.online ?? result).loginStatus ?? null,
-      serviceState: (result.online ?? result).serviceState ?? null,
-    });
-    return result;
-  });
+      if (result.gateway?.host && result.gateway?.port) {
+        const hintedConfig = applyGatewaySelectionHint(config, result.gateway);
+        if (hintedConfig !== config) {
+          await configStore.save(hintedConfig);
+        }
+      }
 
-  ipcMain.handle("vpn:repair-official-ui", async (_event, payload = {}) => {
-    await writeAppEvent("manual-repair-official-ui-started", {
-      remoteDebugPort: payload.remoteDebugPort ?? null,
-      focusServiceTarget: payload.focusServiceTarget ?? true,
-      allowNativeWindowActivation: payload.allowNativeWindowActivation ?? true,
-    });
+      await writeAppEvent("manual-recover-login-completed", {
+        action: result.action ?? result.mode ?? null,
+        gateway: result.gateway ?? null,
+        gatewayAttempts: result.gatewayAttempts ?? [],
+        loginStatus: (result.online ?? result).loginStatus ?? null,
+        serviceState: (result.online ?? result).serviceState ?? null,
+      });
+      return result;
+    }),
+  );
 
-    try {
-      const result = await vpnService.repairOfficialUi(await resolveConfig(payload), {
+  ipcMain.handle("vpn:repair-official-ui", async (_event, payload = {}) =>
+    runVpnAction("repair-official-ui", async () => {
+      await writeAppEvent("manual-repair-official-ui-started", {
         remoteDebugPort: payload.remoteDebugPort ?? null,
         focusServiceTarget: payload.focusServiceTarget ?? true,
         allowNativeWindowActivation: payload.allowNativeWindowActivation ?? true,
       });
-      await writeAppEvent("manual-repair-official-ui-completed", {
-        action: result.action ?? null,
-        reason: result.reason ?? null,
-        gateway: result.gateway ?? null,
-        from: result.from ?? null,
-        closedResidualTargets: result.closedResidualTargets ?? [],
-        repairedResidualTargets: result.repairedResidualTargets ?? [],
-        restoredFrom: result.restoredFrom ?? null,
-        serviceReload: result.serviceReload ?? null,
-        navigation: result.navigation ?? null,
-      });
-      return result;
-    } catch (error) {
-      await writeAppEvent("manual-repair-official-ui-failed", {
-        error: error?.message ?? String(error),
-        code: error?.code,
-      });
-      throw error;
-    }
-  });
+
+      try {
+        const result = await vpnService.repairOfficialUi(await resolveConfig(payload), {
+          remoteDebugPort: payload.remoteDebugPort ?? null,
+          focusServiceTarget: payload.focusServiceTarget ?? true,
+          allowNativeWindowActivation: payload.allowNativeWindowActivation ?? true,
+        });
+        await writeAppEvent("manual-repair-official-ui-completed", {
+          action: result.action ?? null,
+          reason: result.reason ?? null,
+          gateway: result.gateway ?? null,
+          from: result.from ?? null,
+          closedResidualTargets: result.closedResidualTargets ?? [],
+          repairedResidualTargets: result.repairedResidualTargets ?? [],
+          restoredFrom: result.restoredFrom ?? null,
+          serviceReload: result.serviceReload ?? null,
+          navigation: result.navigation ?? null,
+        });
+        return result;
+      } catch (error) {
+        await writeAppEvent("manual-repair-official-ui-failed", {
+          error: error?.message ?? String(error),
+          code: error?.code,
+        });
+        throw error;
+      }
+    }),
+  );
 
   ipcMain.handle("vpn:maintainer-status", async () => {
     const config = await configStore.load();
@@ -860,22 +882,26 @@ function registerIpc() {
       status: vpnMaintainer.getStatus(),
     });
   });
-  ipcMain.handle("vpn:maintainer-start", async (_event, payload = {}) => {
-    const config = await configStore.load();
-    const status = await startMaintainerWithQuietHoursGuard({
-      config,
-      vpnMaintainer,
-      gatewayCandidates: payload.gatewayCandidates ?? [],
-    });
+  ipcMain.handle("vpn:maintainer-start", async (_event, payload = {}) =>
+    runVpnAction("maintainer-start", async () => {
+      const config = await configStore.load();
+      const status = await startMaintainerWithQuietHoursGuard({
+        config,
+        vpnMaintainer,
+        gatewayCandidates: payload.gatewayCandidates ?? [],
+      });
 
-    updateTrayMenu();
-    return status;
-  });
-  ipcMain.handle("vpn:maintainer-stop", async () => {
-    const status = await vpnMaintainer.stop();
-    updateTrayMenu();
-    return status;
-  });
+      updateTrayMenu();
+      return status;
+    }),
+  );
+  ipcMain.handle("vpn:maintainer-stop", async () =>
+    runVpnAction("maintainer-stop", async () => {
+      const status = await vpnMaintainer.stop();
+      updateTrayMenu();
+      return status;
+    }),
+  );
 
   ipcMain.handle("app:open-logs", async () => {
     const info = await vpnService.getEnvironmentInfo(await configStore.load());

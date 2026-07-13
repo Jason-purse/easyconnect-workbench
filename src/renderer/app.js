@@ -2,7 +2,7 @@ import {
   describeOfficialUiConsistency,
   formatOfficialUiMetric,
 } from "../services/official-ui-state.js";
-import { describeMaintainerEvent, extractStatusFromRecoverResult } from "../services/vpn-status-labels.js";
+import { describeMaintainerEvent } from "../services/vpn-status-labels.js";
 import {
   formatAllowedGateways,
   formatGateway,
@@ -21,16 +21,24 @@ import { mergeConfigForRender } from "../services/vpn-render-config.js";
 import {
   deriveConnectionView,
   deriveMaintainerActivity,
+  deriveMaintainerSchedule,
   deriveMaintainerView,
   describeMaintainerStartResult,
 } from "./view-state.js";
+import { IPC_TIMEOUT_MS, runIpcAction } from "./ipc-action-runner.js";
 import { createLatestRequestCoordinator } from "./refresh-coordinator.js";
 import { persistSettingsAndRefresh } from "./settings-workflow.js";
 
 const MAX_ACTIVITY_ENTRIES = 50;
-const RECENT_ACTIVITY_ENTRIES = 4;
+const RECENT_ACTIVITY_ENTRIES = 3;
 const MAINTAINER_REFRESH_INTERVAL_MS = 3000;
 const QUIET_REFRESH_INTERVAL_MS = 30000;
+const REFRESH_TIMEOUT_MS = Object.freeze({
+  config: 5000,
+  status: 5000,
+  recoveryPlan: 10000,
+  snapshot: 20000,
+});
 const $ = (id) => document.getElementById(id);
 const runLatestRefresh = createLatestRequestCoordinator();
 
@@ -59,6 +67,9 @@ const elements = {
   metricOfficialUi: $("metric-official-ui"),
   metricPreferredGateway: $("metric-preferred-gateway"),
   metricMaintainerState: $("metric-maintainer-state"),
+  metricMaintainerInterval: $("metric-maintainer-interval"),
+  metricMaintainerLastCheck: $("metric-maintainer-last-check"),
+  metricMaintainerNextCheck: $("metric-maintainer-next-check"),
   metricCurrentGateway: $("metric-current-gateway"),
   metricLastAction: $("metric-last-action"),
   metricLastError: $("metric-last-error"),
@@ -143,7 +154,25 @@ function formatActivityTime(timestamp) {
   }).format(new Date(timestamp));
 }
 
-function renderActivityList(node, entries) {
+function formatScheduleTime(timestamp) {
+  if (!timestamp) {
+    return "-";
+  }
+
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) {
+    return String(timestamp);
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function renderActivityList(node, entries, { showDetails = false } = {}) {
   if (!node) {
     return;
   }
@@ -174,6 +203,17 @@ function renderActivityList(node, entries) {
     detail.textContent = entry.detail;
     content.append(title, detail);
 
+    if (showDetails && entry.details !== null) {
+      const disclosure = document.createElement("details");
+      disclosure.className = "activity-item__details";
+      const summary = document.createElement("summary");
+      summary.textContent = "查看详情";
+      const data = document.createElement("pre");
+      data.textContent = safeStringify(entry.details);
+      disclosure.append(summary, data);
+      content.append(disclosure);
+    }
+
     const time = document.createElement("time");
     time.dateTime = entry.timestamp;
     time.textContent = formatActivityTime(entry.timestamp);
@@ -185,15 +225,22 @@ function renderActivityList(node, entries) {
 
 function renderActivities() {
   renderActivityList(elements.recentActivityList, activityEntries.slice(0, RECENT_ACTIVITY_ENTRIES));
-  renderActivityList(elements.activityList, activityEntries);
+  renderActivityList(elements.activityList, activityEntries, { showDetails: true });
 }
 
-function appendActivity(title, detail = "", tone = "neutral", timestamp = new Date().toISOString()) {
+function appendActivity(
+  title,
+  detail = "",
+  tone = "neutral",
+  timestamp = new Date().toISOString(),
+  details = null,
+) {
   activityEntries.unshift({
     id: crypto.randomUUID?.() ?? String(Date.now()),
     timestamp,
     title,
     detail: sanitizeDiagnosticValueForDisplay(detail),
+    details: details == null ? null : sanitizeDiagnosticValueForDisplay(details),
     tone,
   });
   activityEntries = activityEntries.slice(0, MAX_ACTIVITY_ENTRIES);
@@ -319,21 +366,6 @@ function togglePasswordVisibility() {
   refreshIcons();
 }
 
-function withTimeout(promise, ms, label) {
-  let timer = null;
-  const timeout = new Promise((_, reject) => {
-    timer = window.setTimeout(() => {
-      reject(new Error(label + " timed out after " + ms + "ms"));
-    }, ms);
-  });
-
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) {
-      window.clearTimeout(timer);
-    }
-  });
-}
-
 function bindClick(element, name, handler) {
   if (!element) {
     appendActivity("界面节点缺失", name, "error");
@@ -428,8 +460,20 @@ function describeConnectionDetail(connectionView, status, config) {
 
 function renderMaintainerStatus(config, maintainerStatus) {
   const maintainerView = deriveMaintainerView({ config, maintainerStatus });
+  const schedule = deriveMaintainerSchedule({ config, maintainerStatus });
   currentMaintainerAction = maintainerView.action;
   setNodeText(elements.metricMaintainerState, maintainerView.label);
+  setNodeText(
+    elements.metricMaintainerInterval,
+    schedule.intervalSeconds === null ? "-" : `${schedule.intervalSeconds} 秒`,
+  );
+  setNodeText(elements.metricMaintainerLastCheck, formatScheduleTime(schedule.lastCheckAt));
+  setNodeText(
+    elements.metricMaintainerNextCheck,
+    schedule.currentCheckRunning
+      ? "检查中"
+      : formatScheduleTime(schedule.resumeAt ?? schedule.nextCheckAt),
+  );
   setNodeText(elements.metricLastAction, formatMaintainerAction(maintainerStatus));
   setNodeText(elements.metricLastError, formatMaintainerLastError(maintainerStatus));
   setNodeText(elements.maintainerAction, maintainerView.actionLabel);
@@ -446,7 +490,7 @@ function renderMaintainerStatus(config, maintainerStatus) {
     lastMaintainerEventAt = activity.eventAt;
     lastMaintainerCycleCount = activity.cycleCount;
     lastMaintainerStartedAt = activity.startedAt;
-    appendActivity(activity.title, activity.detail, activity.tone, activity.timestamp);
+    appendActivity(activity.title, activity.detail, activity.tone, activity.timestamp, activity.details);
   }
   return maintainerView;
 }
@@ -538,12 +582,15 @@ async function withAction(title, action) {
   showActionNotice(title + "中", "正在执行本地操作。", "progress");
   try {
     const result = await action();
-    appendActivity(title, "操作已完成。", "success");
+    appendActivity(title, "操作已完成。", "success", new Date().toISOString(), result);
     showActionNotice(title + "完成", "操作已完成。", "success");
     return result;
   } catch (error) {
     const detail = error?.message ?? String(error);
-    appendActivity(title + "失败", detail, "error");
+    appendActivity(title + "失败", detail, "error", new Date().toISOString(), {
+      error: detail,
+      code: error?.code ?? null,
+    });
     showActionNotice(title + "失败", detail, "error");
     throw error;
   }
@@ -553,28 +600,32 @@ async function refreshStatus(options = {}) {
   return runLatestRefresh(
     async () => {
       const currentConfig = collectConfig();
-      const { status, environmentInfo } = await withTimeout(
-        window.workbench.getVpnSnapshot({
+      const { status, environmentInfo } = await runIpcAction(
+        "读取 VPN 快照",
+        () => window.workbench.getVpnSnapshot({
           config: currentConfig,
           audit: options.audit ?? false,
           auditTrigger: options.auditTrigger ?? "manual-refresh",
         }),
-        20000,
-        "getVpnSnapshot",
+        { timeoutMs: REFRESH_TIMEOUT_MS.snapshot },
       );
       const [storedConfig, maintainerStatus] = await Promise.all([
-        withTimeout(window.workbench.getConfig(), 5000, "getConfig"),
-        withTimeout(window.workbench.getMaintainerStatus(), 5000, "getMaintainerStatus"),
+        runIpcAction("读取设置", () => window.workbench.getConfig(), {
+          timeoutMs: REFRESH_TIMEOUT_MS.config,
+        }),
+        runIpcAction("读取守护状态", () => window.workbench.getMaintainerStatus(), {
+          timeoutMs: REFRESH_TIMEOUT_MS.status,
+        }),
       ]);
       const renderConfig = mergeConfigForRender(currentConfig, storedConfig);
       const displayEnvironmentInfo = sanitizeEnvironmentInfoForDisplay(environmentInfo, renderConfig);
-      const recoveryPlan = await withTimeout(
-        window.workbench.getRecoveryPlan({
+      const recoveryPlan = await runIpcAction(
+        "读取恢复计划",
+        () => window.workbench.getRecoveryPlan({
           config: renderConfig,
           gatewayCandidates: displayEnvironmentInfo?.gatewayCandidates ?? [],
         }),
-        10000,
-        "getRecoveryPlan",
+        { timeoutMs: REFRESH_TIMEOUT_MS.recoveryPlan },
       );
 
       return {
@@ -596,10 +647,14 @@ async function refreshStatus(options = {}) {
 }
 
 async function saveConfig() {
+  runLatestRefresh.invalidate();
   showSettingsFeedback("正在保存设置", "正在更新本地连接与守护配置。", "progress");
   try {
     const { saved, refreshError } = await persistSettingsAndRefresh({
-      save: () => window.workbench.saveConfig(collectConfig()),
+      save: () =>
+        runIpcAction("保存设置", () => window.workbench.saveConfig(collectConfig()), {
+          timeoutMs: IPC_TIMEOUT_MS.quick,
+        }),
       afterSave: (nextConfig) => applyConfig(nextConfig),
       refresh: () => refreshStatus({ silent: true }),
     });
@@ -619,18 +674,26 @@ async function saveConfig() {
     return saved;
   } catch (error) {
     const detail = error?.message ?? String(error);
-    appendActivity("保存设置失败", detail, "error");
+    appendActivity("保存设置失败", detail, "error", new Date().toISOString(), {
+      error: detail,
+      code: error?.code ?? null,
+    });
     showSettingsFeedback("设置保存失败", detail, "error", { focus: true });
     throw error;
   }
 }
 
 async function launchClient() {
+  runLatestRefresh.invalidate();
   const result = await withAction("打开官方客户端", () =>
-    window.workbench.launchOfficialClient({
-      config: collectConfig(),
-      remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || null,
-    }),
+    runIpcAction(
+      "打开官方客户端",
+      () => window.workbench.launchOfficialClient({
+        config: collectConfig(),
+        remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || null,
+      }),
+      { timeoutMs: IPC_TIMEOUT_MS.normal },
+    ),
   );
   renderDiagnosticResult(result);
   showActionNotice("官方客户端已打开", "需要连接时可返回概览执行“立即连接”。", "success");
@@ -646,39 +709,55 @@ async function recoverAndLogin() {
     return null;
   }
 
+  runLatestRefresh.invalidate();
   const result = await withAction("恢复 VPN 连接", () =>
-    window.workbench.recoverAndLogin({
-      config: collectConfig(),
-      username: elements.vpnUsername.value.trim(),
-      password: elements.vpnPassword.value,
-      remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || 9222,
-      gatewayCandidates: lastEnvironmentInfo?.gatewayCandidates ?? [],
-    }),
+    runIpcAction(
+      "恢复 VPN 连接",
+      () => window.workbench.recoverAndLogin({
+        config: collectConfig(),
+        username: elements.vpnUsername.value.trim(),
+        password: elements.vpnPassword.value,
+        remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || 9222,
+        gatewayCandidates: lastEnvironmentInfo?.gatewayCandidates ?? [],
+      }),
+      { timeoutMs: IPC_TIMEOUT_MS.recovery },
+    ),
   );
-  const recoveredStatus = extractStatusFromRecoverResult(result);
   const summary = describeMaintainerEvent({ ok: true, result });
-  const config = await window.workbench.getConfig();
-  const environmentInfo = sanitizeEnvironmentInfoForDisplay(
-    await window.workbench.getEnvironmentInfo(),
-    config,
-  );
-  const maintainerStatus = await window.workbench.getMaintainerStatus();
-  renderStatus(recoveredStatus, environmentInfo, config, maintainerStatus);
-  appendActivity(summary.title, summary.detail, summary.variant);
-  showActionNotice(summary.title, summary.detail, summary.variant);
+  try {
+    await refreshStatus({ silent: true });
+    showActionNotice(summary.title, summary.detail, summary.variant);
+  } catch (error) {
+    const detail = error?.message ?? String(error);
+    appendActivity("VPN 已恢复，但状态刷新失败", detail, "warning", new Date().toISOString(), {
+      error: detail,
+      code: error?.code ?? null,
+    });
+    showActionNotice(summary.title, `${summary.detail} 状态刷新失败：${detail}`, "warning");
+  }
   return result;
 }
 
 async function repairOfficialUi() {
+  runLatestRefresh.invalidate();
   const result = await withAction("修复官方界面", () =>
-    window.workbench.repairOfficialUi({
-      config: collectConfig(),
-      remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || 9222,
-      focusServiceTarget: true,
-    }),
+    runIpcAction(
+      "修复官方界面",
+      () => window.workbench.repairOfficialUi({
+        config: collectConfig(),
+        remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || 9222,
+        focusServiceTarget: true,
+      }),
+      { timeoutMs: IPC_TIMEOUT_MS.recovery },
+    ),
   );
   renderDiagnosticResult(result);
-  await refreshStatus({ silent: true });
+  let refreshError = null;
+  try {
+    await refreshStatus({ silent: true });
+  } catch (error) {
+    refreshError = error;
+  }
 
   const messages = {
     "skip-offline": ["VPN 未在线", "官方界面修复不会触发登录，请先恢复 VPN。", "warning"],
@@ -692,17 +771,29 @@ async function repairOfficialUi() {
     "官方窗口已回到可用状态。",
     "success",
   ];
-  appendActivity(title, detail, tone);
-  showActionNotice(title, detail, tone);
+  if (refreshError) {
+    const refreshDetail = refreshError?.message ?? String(refreshError);
+    appendActivity("官方界面已修复，但状态刷新失败", refreshDetail, "warning", new Date().toISOString(), {
+      error: refreshDetail,
+      code: refreshError?.code ?? null,
+    });
+    showActionNotice(title, `${detail} 状态刷新失败：${refreshDetail}`, "warning");
+  } else {
+    showActionNotice(title, detail, tone);
+  }
   return result;
 }
 
 async function debugTargets() {
   const result = await withAction("读取调试目标", () =>
-    window.workbench.getDebugTargets({
-      config: collectConfig(),
-      remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || 9222,
-    }),
+    runIpcAction(
+      "读取调试目标",
+      () => window.workbench.getDebugTargets({
+        config: collectConfig(),
+        remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || 9222,
+      }),
+      { timeoutMs: IPC_TIMEOUT_MS.normal },
+    ),
   );
   renderDiagnosticResult(result);
   renderView("activity");
@@ -712,10 +803,14 @@ async function debugTargets() {
 
 async function probeRecoveryPlan() {
   const result = await withAction("探测恢复链路", () =>
-    window.workbench.probeRecoveryPlan({
-      config: collectConfig(),
-      gatewayCandidates: lastEnvironmentInfo?.gatewayCandidates ?? [],
-    }),
+    runIpcAction(
+      "探测恢复链路",
+      () => window.workbench.probeRecoveryPlan({
+        config: collectConfig(),
+        gatewayCandidates: lastEnvironmentInfo?.gatewayCandidates ?? [],
+      }),
+      { timeoutMs: IPC_TIMEOUT_MS.normal },
+    ),
   );
   renderRecoveryProbe(result);
   renderDiagnosticResult(result);
@@ -724,13 +819,22 @@ async function probeRecoveryPlan() {
 }
 
 async function startMaintainer() {
-  const savedConfig = await window.workbench.saveConfig(collectConfig());
+  runLatestRefresh.invalidate();
+  const savedConfig = await runIpcAction(
+    "保存守护设置",
+    () => window.workbench.saveConfig(collectConfig()),
+    { timeoutMs: IPC_TIMEOUT_MS.quick },
+  );
   applyConfig(savedConfig);
   showActionNotice("启动自动守护中", "正在检查静默时段与本地守护状态。", "progress");
   try {
-    const result = await window.workbench.startMaintainer({
-      gatewayCandidates: lastEnvironmentInfo?.gatewayCandidates ?? [],
-    });
+    const result = await runIpcAction(
+      "启动自动守护",
+      () => window.workbench.startMaintainer({
+        gatewayCandidates: lastEnvironmentInfo?.gatewayCandidates ?? [],
+      }),
+      { timeoutMs: IPC_TIMEOUT_MS.recovery },
+    );
     let refreshError = null;
     try {
       await refreshStatus({ silent: true });
@@ -738,19 +842,32 @@ async function startMaintainer() {
       refreshError = error;
     }
     const summary = describeMaintainerStartResult(result, { refreshError });
-    appendActivity(summary.title, summary.detail, summary.tone);
+    appendActivity(summary.title, summary.detail, summary.tone, new Date().toISOString(), {
+      result,
+      refreshError: refreshError
+        ? { error: refreshError?.message ?? String(refreshError), code: refreshError?.code ?? null }
+        : null,
+    });
     showActionNotice(summary.title, summary.detail, summary.tone);
     return result;
   } catch (error) {
     const detail = error?.message ?? String(error);
-    appendActivity("启动自动守护失败", detail, "error");
+    appendActivity("启动自动守护失败", detail, "error", new Date().toISOString(), {
+      error: detail,
+      code: error?.code ?? null,
+    });
     showActionNotice("启动自动守护失败", detail, "error");
     throw error;
   }
 }
 
 async function stopMaintainer() {
-  const result = await withAction("停止自动守护", () => window.workbench.stopMaintainer());
+  runLatestRefresh.invalidate();
+  const result = await withAction("停止自动守护", () =>
+    runIpcAction("停止自动守护", () => window.workbench.stopMaintainer(), {
+      timeoutMs: IPC_TIMEOUT_MS.recovery,
+    }),
+  );
   await refreshStatus({ silent: true });
   showActionNotice("自动守护已停止", "后台检查已停止，可随时重新启动。", "success");
   return result;
@@ -830,10 +947,18 @@ function bindStaticInteractions() {
   bindClick($("debug-targets"), "debug-targets", debugTargets);
   bindClick($("probe-recovery"), "probe-recovery", probeRecoveryPlan);
   bindClick($("open-logs"), "open-logs", () =>
-    withAction("打开日志目录", () => window.workbench.openLogsDir()),
+    withAction("打开日志目录", () =>
+      runIpcAction("打开日志目录", () => window.workbench.openLogsDir(), {
+        timeoutMs: IPC_TIMEOUT_MS.quick,
+      }),
+    ),
   );
   bindClick($("open-config-dir"), "open-config-dir", () =>
-    withAction("打开配置目录", () => window.workbench.openConfigDir()),
+    withAction("打开配置目录", () =>
+      runIpcAction("打开配置目录", () => window.workbench.openConfigDir(), {
+        timeoutMs: IPC_TIMEOUT_MS.quick,
+      }),
+    ),
   );
 }
 
@@ -848,7 +973,9 @@ async function init() {
   refreshIcons();
 
   try {
-    const config = await withTimeout(window.workbench.getConfig(), 5000, "getConfig");
+    const config = await runIpcAction("读取设置", () => window.workbench.getConfig(), {
+      timeoutMs: REFRESH_TIMEOUT_MS.config,
+    });
     applyConfig(config);
   } catch (error) {
     const detail = error?.message ?? String(error);

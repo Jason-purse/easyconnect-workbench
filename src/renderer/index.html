@@ -75,10 +75,13 @@
                 <div><span>自动守护</span><h2 id="maintainer-heading">连接维护</h2></div>
                 <button id="maintainer-action" class="button button--secondary" type="button">启动守护</button>
               </div>
-              <dl class="detail-list">
+              <dl class="detail-list detail-list--maintainer">
                 <div><dt>状态</dt><dd id="metric-maintainer-state">-</dd></div>
+                <div><dt>检查间隔</dt><dd id="metric-maintainer-interval">-</dd></div>
+                <div><dt>最近检查</dt><dd id="metric-maintainer-last-check">-</dd></div>
+                <div><dt>下次检查</dt><dd id="metric-maintainer-next-check">-</dd></div>
                 <div><dt>最近动作</dt><dd id="metric-last-action">-</dd></div>
-                <div><dt>上次错误</dt><dd id="metric-last-error">-</dd></div>
+                <div class="detail-list__wide"><dt>上次错误</dt><dd id="metric-last-error">-</dd></div>
               </dl>
             </section>
 

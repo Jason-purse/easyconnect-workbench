@@ -1,14 +1,54 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { extname, resolve, sep } from "node:path";
-import { tmpdir } from "node:os";
+import { delimiter, dirname, extname, join, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
-const PLAYWRIGHT_CLI = "/Users/jasonj/.codex/bin/playwright-cli";
 const SESSION_NAME = "easyconnect-vpn-only-keyboard-qa";
-const NODE_BIN_DIR = "/Users/jasonj/.nvm/versions/node/v24.14.0/bin";
+const NODE_BIN_DIR = dirname(process.execPath);
+
+async function isExecutable(filePath) {
+  if (!filePath) {
+    return false;
+  }
+
+  try {
+    await access(filePath, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolvePlaywrightCli(environment = process.env) {
+  const configuredCandidates = [
+    environment.PLAYWRIGHT_CLI,
+    environment.CODEX_HOME ? join(environment.CODEX_HOME, "bin", "playwright-cli") : null,
+    join(homedir(), ".codex", "bin", "playwright-cli"),
+  ].filter(Boolean);
+
+  for (const candidate of configuredCandidates) {
+    if (await isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  for (const directory of (environment.PATH ?? "").split(delimiter).filter(Boolean)) {
+    const candidate = join(directory, "playwright-cli");
+    if (await isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    "playwright-cli was not found. Set PLAYWRIGHT_CLI, CODEX_HOME, or add playwright-cli to PATH.",
+  );
+}
+
+const PLAYWRIGHT_CLI = await resolvePlaywrightCli();
 
 const WORKBENCH_STUB = String.raw`
   (() => {
@@ -63,7 +103,10 @@ const WORKBENCH_STUB = String.raw`
       getEnvironmentInfo: async () => clone(environmentInfo),
       getRecoveryPlan: async () => ({ gateways: [], fallback: "portal-debug" }),
       probeRecoveryPlan: async () => [],
-      launchOfficialClient: async () => ({ action: "stub-launch" }),
+      launchOfficialClient: async () => ({
+        action: "stub-launch",
+        details: { visible: "activity-detail-value", token: "activity-detail-secret" },
+      }),
       recoverOfficialClient: async () => ({ action: "stub-recover" }),
       getDebugTargets: async () => [],
       portalLogin: async () => ({ action: "stub-portal-login" }),
@@ -79,10 +122,39 @@ const WORKBENCH_STUB = String.raw`
 `;
 
 const BROWSER_ASSERTIONS = String.raw`
+async (page) => {
   const assert = (condition, message) => {
     if (!condition) throw new Error(message);
   };
   await page.waitForFunction(() => document.querySelector("#connection-title")?.textContent === "连接受到保护");
+
+  for (const viewport of [{ width: 1040, height: 720 }, { width: 900, height: 640 }]) {
+    await page.setViewportSize(viewport);
+    const layout = await page.evaluate(() => {
+      const section = document.querySelector('[aria-labelledby="maintainer-heading"]');
+      const heading = section.querySelector(".section-heading > div").getBoundingClientRect();
+      const action = document.querySelector("#maintainer-action").getBoundingClientRect();
+      const sectionRect = section.getBoundingClientRect();
+      const valuesFit = Array.from(section.querySelectorAll("dd")).every((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.left >= sectionRect.left - 1 && rect.right <= sectionRect.right + 1;
+      });
+      const actionOverlapsHeading = !(
+        action.right <= heading.left ||
+        action.left >= heading.right ||
+        action.bottom <= heading.top ||
+        action.top >= heading.bottom
+      );
+      return {
+        noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+        valuesFit,
+        actionOverlapsHeading,
+      };
+    });
+    assert(layout.noHorizontalOverflow, viewport.width + "px viewport must not overflow horizontally");
+    assert(layout.valuesFit, viewport.width + "px maintainer values must stay inside their section");
+    assert(!layout.actionOverlapsHeading, viewport.width + "px maintainer heading and action must not overlap");
+  }
 
   const openButton = page.locator("#open-settings");
   await openButton.focus();
@@ -137,6 +209,22 @@ const BROWSER_ASSERTIONS = String.raw`
   assert(saved.inline, "saved feedback must remain inside the settings drawer");
   assert(!saved.hidden, "saved feedback must be visible");
   assert(saved.title === "设置已保存", "Enter must submit through the real form handler");
+
+  await page.keyboard.press("Escape");
+  await page.locator("#show-activity").click();
+  await page.locator(".diagnostics > summary").click();
+  await page.locator("#launch-client").click();
+  await page.waitForFunction(() => document.querySelector("#activity-list details summary")?.textContent === "查看详情");
+  const activity = await page.evaluate(() => ({
+    recentCount: document.querySelectorAll("#recent-activity-list .activity-item").length,
+    fullDetails: Array.from(document.querySelectorAll("#activity-list details")).map((node) => node.textContent),
+    overviewDetails: document.querySelector("#recent-activity-list details") !== null,
+  }));
+  assert(activity.recentCount === 3, "overview must show exactly three recent activity entries");
+  assert(activity.fullDetails.some((text) => text.includes("activity-detail-value")), "full activity must show sanitized details");
+  assert(activity.fullDetails.every((text) => !text.includes("activity-detail-secret")), "activity details must redact sensitive values");
+  assert(!activity.overviewDetails, "overview activity preview must stay compact");
+}
 `;
 
 const MIME_TYPES = new Map([
@@ -149,7 +237,7 @@ const MIME_TYPES = new Map([
 
 function runPlaywright(args, { allowFailure = false } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(PLAYWRIGHT_CLI, ["--session", SESSION_NAME, ...args], {
+    const child = spawn(PLAYWRIGHT_CLI, ["--json", "--session", SESSION_NAME, ...args], {
       cwd: tmpdir(),
       env: {
         ...process.env,
@@ -167,13 +255,20 @@ function runPlaywright(args, { allowFailure = false } = {}) {
     });
     child.on("error", rejectPromise);
     child.on("close", (code) => {
-      if (code === 0 || allowFailure) {
+      let response = null;
+      try {
+        response = JSON.parse(stdout);
+      } catch {
+        // Preserve the command output below when the CLI cannot return JSON.
+      }
+      const failed = code !== 0 || response?.isError === true;
+      if (!failed || allowFailure) {
         resolvePromise({ code, stdout, stderr });
         return;
       }
       rejectPromise(
         new Error(
-          `playwright-cli ${args[0]} failed with exit ${code}\n${stdout}${stderr}`.trim(),
+          response?.error ?? `playwright-cli ${args[0]} failed with exit ${code}\n${stdout}${stderr}`.trim(),
         ),
       );
     });
@@ -247,7 +342,7 @@ try {
   await runPlaywright(["close"], { allowFailure: true });
   await runPlaywright(["open", url]);
   await runPlaywright(["run-code", BROWSER_ASSERTIONS]);
-  console.log("renderer keyboard QA passed: 5 behaviors");
+  console.log("renderer keyboard QA passed: 9 behaviors");
 } catch (error) {
   console.error(error?.stack ?? String(error));
   process.exitCode = 1;

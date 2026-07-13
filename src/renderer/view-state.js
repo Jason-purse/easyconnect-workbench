@@ -1,5 +1,8 @@
 import { describeMaintainerEvent } from "../services/vpn-status-labels.js";
-import { sanitizeDiagnosticTextForDisplay } from "../services/vpn-display.js";
+import {
+  sanitizeDiagnosticTextForDisplay,
+  sanitizeDiagnosticValueForDisplay,
+} from "../services/vpn-display.js";
 
 function getLastAction(maintainerStatus = {}) {
   return (
@@ -151,6 +154,67 @@ export function deriveMaintainerView({ config = {}, maintainerStatus = {} } = {}
   };
 }
 
+function getMaintainerIntervalSeconds(config, maintainerStatus) {
+  const value = Number(
+    maintainerStatus?.intervalSeconds ?? config?.vpn?.maintainerIntervalSeconds ?? 300,
+  );
+  return Number.isFinite(value) && value > 0 ? value : 300;
+}
+
+function addSeconds(timestamp, seconds) {
+  const timestampMs = Date.parse(timestamp);
+  return Number.isFinite(timestampMs) ? new Date(timestampMs + seconds * 1000).toISOString() : null;
+}
+
+export function deriveMaintainerSchedule({
+  config = {},
+  maintainerStatus = {},
+  nowMs = Date.now(),
+} = {}) {
+  const lastCheckAt = maintainerStatus.lastEventAt ?? null;
+  const currentCheckRunning = Boolean(maintainerStatus.currentPhase);
+
+  if (isQuietHours(maintainerStatus)) {
+    const nextIntervalMs = Number(maintainerStatus.quietHours?.nextIntervalMs);
+    const resumeAt =
+      maintainerStatus.quietHours?.resumeAt ??
+      (Number.isFinite(nextIntervalMs) && nextIntervalMs > 0
+        ? new Date(nowMs + nextIntervalMs).toISOString()
+        : null);
+    return {
+      state: "quiet",
+      intervalSeconds: getMaintainerIntervalSeconds(config, maintainerStatus),
+      lastCheckAt,
+      nextCheckAt: null,
+      resumeAt,
+      currentCheckRunning: false,
+    };
+  }
+
+  if (!maintainerStatus.running) {
+    return {
+      state: "stopped",
+      intervalSeconds: null,
+      lastCheckAt: null,
+      nextCheckAt: null,
+      resumeAt: null,
+      currentCheckRunning: false,
+    };
+  }
+
+  const intervalSeconds = getMaintainerIntervalSeconds(config, maintainerStatus);
+  return {
+    state: "running",
+    intervalSeconds,
+    lastCheckAt,
+    nextCheckAt: currentCheckRunning
+      ? null
+      : addSeconds(lastCheckAt ?? maintainerStatus.startedAt, intervalSeconds),
+    resumeAt: null,
+    currentCheckRunning,
+  };
+}
+
 export function deriveMaintainerActivity({
   maintainerStatus = {},
   previousEventAt = null,
@@ -189,6 +253,7 @@ export function deriveMaintainerActivity({
     timestamp: eventAt,
     title: summary.title,
     detail: sanitizeDiagnosticTextForDisplay(summary.detail),
+    details: sanitizeDiagnosticValueForDisplay(maintainerStatus.lastEvent),
     tone: summary.variant,
   };
 }
