@@ -1,7 +1,101 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { maybeStartMaintainerAutoStart } from "../src/services/vpn-autostart.js";
+import {
+  getMaintainerStatusWithQuietHours,
+  maybeStartMaintainerAutoStart,
+  startMaintainerWithQuietHoursGuard,
+} from "../src/services/vpn-autostart.js";
+
+test("getMaintainerStatusWithQuietHours exposes the authoritative current window", () => {
+  const config = {
+    vpn: {
+      maintainerQuietHoursEnabled: true,
+      maintainerQuietStart: "18:30",
+      maintainerQuietEnd: "09:00",
+    },
+  };
+
+  const quiet = getMaintainerStatusWithQuietHours({
+    config,
+    status: { running: false, lastEvent: null },
+    nowMs: new Date(2026, 0, 1, 19, 0, 0, 0).getTime(),
+  });
+  assert.equal(quiet.quietHours.active, true);
+
+  const resumed = getMaintainerStatusWithQuietHours({
+    config,
+    status: {
+      running: false,
+      lastEvent: { result: { action: "keepalive-paused-quiet-hours" } },
+    },
+    nowMs: new Date(2026, 0, 2, 9, 0, 0, 0).getTime(),
+  });
+  assert.equal(resumed.quietHours.active, false);
+});
+
+test("startMaintainerWithQuietHoursGuard does not enter VpnMaintainer.start during quiet hours", async () => {
+  const calls = [];
+  const result = await startMaintainerWithQuietHoursGuard({
+    config: {
+      vpn: {
+        maintainerQuietHoursEnabled: true,
+        maintainerQuietStart: "18:30",
+        maintainerQuietEnd: "09:00",
+      },
+    },
+    vpnMaintainer: {
+      getStatus() {
+        calls.push("getStatus");
+        return { running: false };
+      },
+      async start() {
+        calls.push("start");
+        return { running: true };
+      },
+    },
+    nowMs: new Date(2026, 0, 1, 19, 0, 0, 0).getTime(),
+  });
+
+  assert.deepEqual(calls, ["getStatus"]);
+  assert.equal(result.running, false);
+  assert.equal(result.quietHours.active, true);
+  assert.equal(result.startSuppressed, true);
+});
+
+test("startMaintainerWithQuietHoursGuard starts normally after quiet hours", async () => {
+  const calls = [];
+  const config = {
+    vpn: {
+      maintainerQuietHoursEnabled: true,
+      maintainerQuietStart: "18:30",
+      maintainerQuietEnd: "09:00",
+    },
+  };
+  const result = await startMaintainerWithQuietHoursGuard({
+    config,
+    gatewayCandidates: [{ host: "203.0.113.10", port: 9898 }],
+    vpnMaintainer: {
+      getStatus() {
+        return { running: false };
+      },
+      async start(receivedConfig, options) {
+        calls.push({ receivedConfig, options });
+        return { running: true };
+      },
+    },
+    nowMs: new Date(2026, 0, 2, 9, 0, 0, 0).getTime(),
+  });
+
+  assert.deepEqual(calls, [
+    {
+      receivedConfig: config,
+      options: { gatewayCandidates: [{ host: "203.0.113.10", port: 9898 }] },
+    },
+  ]);
+  assert.equal(result.running, true);
+  assert.equal(result.quietHours.active, false);
+});
 
 test("maybeStartMaintainerAutoStart leaves disabled auto-start untouched", async () => {
   const calls = [];

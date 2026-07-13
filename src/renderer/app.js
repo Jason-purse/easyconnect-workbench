@@ -11,10 +11,20 @@ import {
   formatMaintainerGateway,
   formatMaintainerLastError,
   formatRecoveryPlan,
+  formatSessionId,
+  sanitizeDiagnosticValueForDisplay,
+  sanitizeMaintainerStatusForDisplay,
   sanitizeEnvironmentInfoForDisplay,
+  sanitizeVpnStatusForDisplay,
 } from "../services/vpn-display.js";
 import { mergeConfigForRender } from "../services/vpn-render-config.js";
-import { deriveConnectionView, deriveMaintainerView } from "./view-state.js";
+import {
+  deriveConnectionView,
+  deriveMaintainerActivity,
+  deriveMaintainerView,
+  describeMaintainerStartResult,
+} from "./view-state.js";
+import { persistSettingsAndRefresh } from "./settings-workflow.js";
 
 const MAX_ACTIVITY_ENTRIES = 50;
 const RECENT_ACTIVITY_ENTRIES = 4;
@@ -23,6 +33,7 @@ const QUIET_REFRESH_INTERVAL_MS = 30000;
 const $ = (id) => document.getElementById(id);
 
 const elements = {
+  appShell: document.querySelector(".app-shell"),
   appLaunchAtLogin: $("app-launch-at-login"),
   vpnUsername: $("vpn-username"),
   vpnPassword: $("vpn-password"),
@@ -63,6 +74,9 @@ const elements = {
   settingsDrawer: $("settings-drawer"),
   settingsBackdrop: $("settings-backdrop"),
   settingsForm: $("settings-form"),
+  settingsFeedback: $("settings-feedback"),
+  settingsFeedbackTitle: $("settings-feedback-title"),
+  settingsFeedbackDetail: $("settings-feedback-detail"),
   viewPanels: Array.from(document.querySelectorAll("[data-view-panel]")),
   viewButtons: Array.from(document.querySelectorAll("[data-view]")),
 };
@@ -74,6 +88,7 @@ let maintainerRefreshTimer = null;
 let maintainerRefreshInFlight = false;
 let lastEnvironmentInfo = null;
 let lastSettingsFocus = null;
+let lastMaintainerEventAt = null;
 let activityEntries = [];
 
 function safeStringify(value) {
@@ -111,7 +126,9 @@ function setActionBusy(button, busy) {
     return;
   }
 
-  button.disabled = button === elements.maintainerAction && currentMaintainerAction === null;
+  button.disabled =
+    (button === elements.maintainerAction && currentMaintainerAction === null) ||
+    (button === elements.connectionPrimaryAction && currentConnectionAction === null);
 }
 
 function formatActivityTime(timestamp) {
@@ -167,12 +184,12 @@ function renderActivities() {
   renderActivityList(elements.activityList, activityEntries);
 }
 
-function appendActivity(title, detail = "", tone = "neutral") {
+function appendActivity(title, detail = "", tone = "neutral", timestamp = new Date().toISOString()) {
   activityEntries.unshift({
     id: crypto.randomUUID?.() ?? String(Date.now()),
-    timestamp: new Date().toISOString(),
+    timestamp,
     title,
-    detail,
+    detail: sanitizeDiagnosticValueForDisplay(detail),
     tone,
   });
   activityEntries = activityEntries.slice(0, MAX_ACTIVITY_ENTRIES);
@@ -187,11 +204,64 @@ function showActionNotice(title, detail = "", tone = "neutral") {
   elements.actionNotice.classList.remove("is-hidden");
   elements.actionNotice.dataset.tone = tone;
   setNodeText(elements.actionNoticeTitle, title);
-  setNodeText(elements.actionNoticeDetail, detail);
+  setNodeText(elements.actionNoticeDetail, sanitizeDiagnosticValueForDisplay(detail));
 }
 
 function hideActionNotice() {
   elements.actionNotice?.classList.add("is-hidden");
+}
+
+function showSettingsFeedback(title, detail = "", tone = "neutral", { focus = false } = {}) {
+  if (!elements.settingsFeedback) {
+    return;
+  }
+
+  elements.settingsFeedback.classList.remove("is-hidden");
+  elements.settingsFeedback.dataset.tone = tone;
+  setNodeText(elements.settingsFeedbackTitle, title);
+  setNodeText(elements.settingsFeedbackDetail, sanitizeDiagnosticValueForDisplay(detail));
+  if (focus) {
+    elements.settingsFeedback.focus();
+  }
+}
+
+function hideSettingsFeedback() {
+  elements.settingsFeedback?.classList.add("is-hidden");
+}
+
+function getSettingsFocusableElements() {
+  if (!elements.settingsDrawer) {
+    return [];
+  }
+
+  return Array.from(
+    elements.settingsDrawer.querySelectorAll(
+      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), details > summary, [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => !element.closest("[hidden]") && element.getClientRects().length > 0);
+}
+
+function trapSettingsFocus(event) {
+  if (event.key !== "Tab" || !elements.settingsDrawer?.classList.contains("is-open")) {
+    return;
+  }
+
+  const focusable = getSettingsFocusableElements();
+  if (focusable.length === 0) {
+    event.preventDefault();
+    elements.settingsDrawer.focus();
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function renderView(view) {
@@ -212,6 +282,8 @@ function renderView(view) {
 
 function openSettings() {
   lastSettingsFocus = document.activeElement;
+  hideSettingsFeedback();
+  elements.appShell?.setAttribute("inert", "");
   elements.settingsDrawer?.removeAttribute("inert");
   elements.settingsDrawer?.classList.add("is-open");
   elements.settingsDrawer?.setAttribute("aria-hidden", "false");
@@ -226,6 +298,7 @@ function closeSettings() {
   elements.settingsDrawer?.setAttribute("aria-hidden", "true");
   elements.settingsBackdrop?.classList.add("is-hidden");
   document.body.classList.remove("has-open-drawer");
+  elements.appShell?.removeAttribute("inert");
   if (lastSettingsFocus instanceof HTMLElement) {
     lastSettingsFocus.focus();
   }
@@ -322,6 +395,10 @@ function applyConfig(config) {
 }
 
 function describeConnectionDetail(connectionView, status, config) {
+  if (connectionView.detail) {
+    return connectionView.detail;
+  }
+
   const officialUiSummary = describeOfficialUiConsistency(status);
   if (officialUiSummary) {
     return officialUiSummary.detail;
@@ -354,7 +431,15 @@ function renderMaintainerStatus(config, maintainerStatus) {
   setNodeText(elements.maintainerAction, maintainerView.actionLabel);
   elements.maintainerAction.disabled = maintainerView.action === null;
   elements.maintainerAction.dataset.action = maintainerView.action ?? "";
-  setNodeText(elements.maintainerStatus, safeStringify(maintainerStatus));
+  setNodeText(elements.maintainerStatus, safeStringify(sanitizeMaintainerStatusForDisplay(maintainerStatus)));
+  const activity = deriveMaintainerActivity({
+    maintainerStatus,
+    previousEventAt: lastMaintainerEventAt,
+  });
+  if (activity) {
+    lastMaintainerEventAt = activity.eventAt;
+    appendActivity(activity.title, activity.detail, activity.tone, activity.timestamp);
+  }
   return maintainerView;
 }
 
@@ -369,13 +454,17 @@ function renderStatus(status, environmentInfo, config, maintainerStatus) {
   elements.connectionBand.dataset.tone = connectionView.tone;
   setNodeText(elements.connectionState, connectionView.label);
   setNodeText(elements.connectionTitle, connectionView.title);
-  setNodeText(elements.connectionDetail, describeConnectionDetail(connectionView, status, config));
+  setNodeText(
+    elements.connectionDetail,
+    sanitizeDiagnosticValueForDisplay(describeConnectionDetail(connectionView, status, config)),
+  );
   setNodeText(elements.connectionPrimaryAction, connectionView.primaryLabel);
   elements.connectionPrimaryAction.dataset.action = connectionView.primaryAction;
+  elements.connectionPrimaryAction.disabled = connectionView.primaryAction === null;
 
   setNodeText(elements.metricCurrentGateway, currentGateway === "-" ? fallbackGateway : currentGateway);
   setNodeText(elements.metricLoginStatus, config?.vpn?.username || status.loginStatus?.status || "-");
-  setNodeText(elements.metricSessionId, status.activeSession?.sessionId ?? "-");
+  setNodeText(elements.metricSessionId, formatSessionId(status.activeSession?.sessionId));
   setNodeText(
     elements.metricClientState,
     status.serviceState
@@ -392,7 +481,7 @@ function renderStatus(status, environmentInfo, config, maintainerStatus) {
   setNodeText(elements.metricOfficialUi, formatOfficialUiMetric(status.officialUi));
   setNodeText(elements.metricPreferredGateway, fallbackGateway);
   setNodeText(elements.metricAllowedGateways, formatAllowedGateways(config).replaceAll("\n", " / "));
-  setNodeText(elements.vpnStatus, safeStringify(status));
+  setNodeText(elements.vpnStatus, safeStringify(sanitizeVpnStatusForDisplay(status)));
 
   scheduleMaintainerRefresh(maintainerStatus, maintainerView);
 }
@@ -403,6 +492,10 @@ function renderRecoveryPlan(plan) {
 
 function renderRecoveryProbe(results) {
   setNodeText(elements.recoveryProbe, formatGatewayProbeResults(results));
+}
+
+function renderDiagnosticResult(result) {
+  setNodeText(elements.diagnosticResult, safeStringify(sanitizeDiagnosticValueForDisplay(result)));
 }
 
 function scheduleMaintainerRefresh(maintainerStatus, maintainerView = deriveMaintainerView({ maintainerStatus })) {
@@ -489,12 +582,33 @@ async function refreshStatus(options = {}) {
 }
 
 async function saveConfig() {
-  const saved = await withAction("保存设置", () => window.workbench.saveConfig(collectConfig()));
-  applyConfig(saved);
-  closeSettings();
-  await refreshStatus({ silent: true });
-  showActionNotice("设置已保存", "新的连接与守护设置已经生效。", "success");
-  return saved;
+  showSettingsFeedback("正在保存设置", "正在更新本地连接与守护配置。", "progress");
+  try {
+    const { saved, refreshError } = await persistSettingsAndRefresh({
+      save: () => window.workbench.saveConfig(collectConfig()),
+      afterSave: (nextConfig) => applyConfig(nextConfig),
+      refresh: () => refreshStatus({ silent: true }),
+    });
+    appendActivity("保存设置", "新的连接与守护设置已经生效。", "success");
+    if (refreshError) {
+      const detail = refreshError?.message ?? String(refreshError);
+      appendActivity("设置已保存，但状态刷新失败", detail, "warning");
+      showSettingsFeedback(
+        "设置已保存",
+        `设置已生效，但状态刷新失败：${detail}`,
+        "warning",
+        { focus: true },
+      );
+      return saved;
+    }
+    showSettingsFeedback("设置已保存", "新的连接与守护设置已经生效。", "success", { focus: true });
+    return saved;
+  } catch (error) {
+    const detail = error?.message ?? String(error);
+    appendActivity("保存设置失败", detail, "error");
+    showSettingsFeedback("设置保存失败", detail, "error", { focus: true });
+    throw error;
+  }
 }
 
 async function launchClient() {
@@ -504,7 +618,7 @@ async function launchClient() {
       remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || null,
     }),
   );
-  setNodeText(elements.diagnosticResult, safeStringify(result));
+  renderDiagnosticResult(result);
   showActionNotice("官方客户端已打开", "需要连接时可返回概览执行“立即连接”。", "success");
   return result;
 }
@@ -549,7 +663,7 @@ async function repairOfficialUi() {
       focusServiceTarget: true,
     }),
   );
-  setNodeText(elements.diagnosticResult, safeStringify(result));
+  renderDiagnosticResult(result);
   await refreshStatus({ silent: true });
 
   const messages = {
@@ -576,7 +690,7 @@ async function debugTargets() {
       remoteDebugPort: Number.parseInt(elements.vpnDebugPort.value, 10) || 9222,
     }),
   );
-  setNodeText(elements.diagnosticResult, safeStringify(result));
+  renderDiagnosticResult(result);
   renderView("activity");
   showActionNotice("调试目标已更新", "结果已写入高级诊断。", "success");
   return result;
@@ -590,7 +704,7 @@ async function probeRecoveryPlan() {
     }),
   );
   renderRecoveryProbe(result);
-  setNodeText(elements.diagnosticResult, safeStringify(result));
+  renderDiagnosticResult(result);
   showActionNotice("恢复链路探测完成", "候选网关和验证码要求已经更新。", "success");
   return result;
 }
@@ -598,14 +712,27 @@ async function probeRecoveryPlan() {
 async function startMaintainer() {
   const savedConfig = await window.workbench.saveConfig(collectConfig());
   applyConfig(savedConfig);
-  const result = await withAction("启动自动守护", () =>
-    window.workbench.startMaintainer({
+  showActionNotice("启动自动守护中", "正在检查静默时段与本地守护状态。", "progress");
+  try {
+    const result = await window.workbench.startMaintainer({
       gatewayCandidates: lastEnvironmentInfo?.gatewayCandidates ?? [],
-    }),
-  );
-  await refreshStatus({ silent: true });
-  showActionNotice("自动守护已启动", "Workbench 会在后台周期检查 VPN 状态。", "success");
-  return result;
+    });
+    let refreshError = null;
+    try {
+      await refreshStatus({ silent: true });
+    } catch (error) {
+      refreshError = error;
+    }
+    const summary = describeMaintainerStartResult(result, { refreshError });
+    appendActivity(summary.title, summary.detail, summary.tone);
+    showActionNotice(summary.title, summary.detail, summary.tone);
+    return result;
+  } catch (error) {
+    const detail = error?.message ?? String(error);
+    appendActivity("启动自动守护失败", detail, "error");
+    showActionNotice("启动自动守护失败", detail, "error");
+    throw error;
+  }
 }
 
 async function stopMaintainer() {
@@ -616,12 +743,19 @@ async function stopMaintainer() {
 }
 
 async function handleConnectionPrimaryAction() {
+  if (currentConnectionAction === null) {
+    return;
+  }
   if (currentConnectionAction === "open-settings") {
     openSettings();
     return;
   }
   if (currentConnectionAction === "recover") {
     await recoverAndLogin();
+    return;
+  }
+  if (currentConnectionAction === "launch-client") {
+    await launchClient();
     return;
   }
   await withAction("检查连接", () =>
@@ -656,6 +790,7 @@ function bindStaticInteractions() {
   $("dismiss-action-notice")?.addEventListener("click", hideActionNotice);
   $("toggle-password")?.addEventListener("click", togglePasswordVisibility);
   document.addEventListener("keydown", (event) => {
+    trapSettingsFocus(event);
     if (event.key === "Escape" && elements.settingsDrawer?.classList.contains("is-open")) {
       closeSettings();
     }

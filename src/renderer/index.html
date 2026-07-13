@@ -136,6 +136,8 @@
       class="settings-drawer"
       aria-hidden="true"
       aria-labelledby="settings-title"
+      role="dialog"
+      aria-modal="true"
       inert
       tabindex="-1"
     >
@@ -222,6 +224,10 @@
         </details>
 
         <div class="settings-drawer__footer">
+          <div id="settings-feedback" class="settings-feedback is-hidden" role="status" aria-live="polite" tabindex="-1">
+            <strong id="settings-feedback-title"></strong>
+            <span id="settings-feedback-detail"></span>
+          </div>
           <button id="save-config" class="button button--primary" type="submit">保存设置</button>
         </div>
       </form>

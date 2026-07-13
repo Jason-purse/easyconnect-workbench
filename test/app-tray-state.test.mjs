@@ -29,7 +29,7 @@ test("tray labels report online session from maintainer result", () => {
 
   assert.equal(labels.title, "EasyConnect: 在线");
   assert.equal(labels.gateway, "203.0.113.10:9898");
-  assert.equal(labels.session, "abcdef01...6789");
+  assert.equal(labels.session, "abcd…6789");
   assert.equal(labels.action, "already-online");
   assert.equal(labels.canStart, false);
   assert.equal(labels.canStop, true);
@@ -63,6 +63,41 @@ test("tray labels expose failed gateway state", () => {
   assert.match(labels.detail, /两个已配置网关都恢复失败/);
   assert.equal(labels.canStart, false);
   assert.equal(labels.canStop, true);
+});
+
+test("tray labels redact error details and never expose a complete short session id", () => {
+  const secret = "secret-session-token";
+  const labels = buildTrayStatusLabels({
+    running: true,
+    lastEvent: {
+      ok: false,
+      error: `failed {"token":"${secret}"}`,
+      result: {
+        activeSession: { sessionId: "session-1" },
+        loginStatus: { status: "1" },
+      },
+    },
+  });
+
+  assert.equal(labels.detail.includes(secret), false);
+  assert.notEqual(labels.session, "session-1");
+});
+
+test("tray labels suppress maintainer start during authoritative quiet hours", () => {
+  const labels = buildTrayStatusLabels({
+    running: false,
+    quietHours: {
+      active: true,
+      start: "18:30",
+      end: "09:00",
+    },
+    lastEvent: null,
+  });
+
+  assert.equal(labels.title, "EasyConnect: 静默时段");
+  assert.equal(labels.variant, "quiet");
+  assert.equal(labels.canStart, false);
+  assert.equal(labels.canStop, false);
 });
 
 test("tray tooltip includes compact state for menu bar hover", () => {

@@ -10,8 +10,112 @@ import {
   formatMaintainerGateway,
   formatMaintainerLastError,
   formatRecoveryPlan,
+  formatSessionId,
+  sanitizeDiagnosticValueForDisplay,
   sanitizeEnvironmentInfoForDisplay,
+  sanitizeMaintainerStatusForDisplay,
+  sanitizeVpnStatusForDisplay,
 } from "../src/services/vpn-display.js";
+
+test("formatSessionId masks session material for summary display", () => {
+  assert.equal(formatSessionId("preview-session-7f2a"), "prev…7f2a");
+  assert.equal(formatSessionId(null), "-");
+});
+
+test("sanitizeVpnStatusForDisplay allowlists status fields and redacts session ids", () => {
+  const sanitized = sanitizeVpnStatusForDisplay({
+    loginStatus: { status: "1", raw: "secret" },
+    activeSession: {
+      sessionId: "preview-session-7f2a",
+      token: "derived-secret-token",
+      tokenRedacted: "deri...oken",
+    },
+    serviceState: { base: 18, l3vpn: 18, tcp: 43, raw: "secret" },
+    latestCachedToken: { token: "cached-secret-token" },
+    officialUi: {
+      reachable: true,
+      remoteDebugPort: 9222,
+      targets: [{ url: "https://gateway.example/portal/?token=secret" }],
+      primaryTarget: { kind: "service", url: "https://gateway.example/portal/?token=secret" },
+      hasServiceTarget: true,
+      hasVisibleServiceTarget: true,
+      hasBlockingVisibleTarget: false,
+      hasBlockingNativeAlert: false,
+      needsNativeWindowRestore: false,
+      hasDuplicateNativeWindows: false,
+    },
+  });
+
+  assert.deepEqual(sanitized.activeSession, { sessionId: "prev…7f2a" });
+  assert.deepEqual(sanitized.loginStatus, { status: "1" });
+  assert.deepEqual(sanitized.serviceState, { base: 18, l3vpn: 18, tcp: 43 });
+  assert.equal(sanitized.officialUi.primaryKind, "service");
+  assert.equal(JSON.stringify(sanitized).includes("preview-session-7f2a"), false);
+  assert.equal(JSON.stringify(sanitized).includes("secret"), false);
+  assert.equal(Object.hasOwn(sanitized, "latestCachedToken"), false);
+});
+
+test("sanitizeDiagnosticValueForDisplay recursively redacts debug URLs and session material", () => {
+  const sanitized = sanitizeDiagnosticValueForDisplay({
+    url: "https://gateway.example/portal/?twfid=twf-secret&token=url-secret",
+    webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/socket-secret",
+    sessionId: "full-session-secret",
+    token: "plain-token-secret",
+    nested: {
+      cookie: "cookie-secret",
+      error: "failed https://gateway.example/?token=error-secret",
+    },
+  });
+
+  const serialized = JSON.stringify(sanitized);
+  for (const secret of [
+    "twf-secret",
+    "url-secret",
+    "socket-secret",
+    "full-session-secret",
+    "plain-token-secret",
+    "cookie-secret",
+    "error-secret",
+  ]) {
+    assert.equal(serialized.includes(secret), false, `${secret} must be redacted`);
+  }
+  assert.equal(sanitized.sessionId, "<redacted>");
+  assert.equal(sanitized.token, "<redacted>");
+  assert.equal(sanitized.webSocketDebuggerUrl, "<redacted>");
+});
+
+test("sanitizeDiagnosticValueForDisplay redacts credentials embedded as JSON text", () => {
+  const sanitized = sanitizeDiagnosticValueForDisplay({
+    error:
+      'Failed {"twfid":"twf-secret","sessionId":"session-secret","token":"token-secret","webSocketDebuggerUrl":"ws://127.0.0.1/socket-secret"}',
+  });
+  const serialized = JSON.stringify(sanitized);
+
+  for (const secret of ["twf-secret", "session-secret", "token-secret", "socket-secret"]) {
+    assert.equal(serialized.includes(secret), false, `${secret} must be redacted`);
+  }
+});
+
+test("display status sanitizers redact credentials embedded in error strings", () => {
+  const secret = "secret-session-token";
+  const vpnStatus = sanitizeVpnStatusForDisplay({
+    error: `failed https://gateway.example/?token=${secret}`,
+  });
+  const maintainerStatus = sanitizeMaintainerStatusForDisplay({
+    lastError: `failed token=${secret}`,
+    lastEvent: {
+      ok: false,
+      error: `cookie=${secret}`,
+      result: {
+        gatewayAttempts: [{ error: `twfid=${secret}` }],
+        officialUiRepair: { error: `sessionId=${secret}` },
+      },
+    },
+  });
+
+  assert.equal(JSON.stringify(vpnStatus).includes(secret), false);
+  assert.equal(JSON.stringify(maintainerStatus).includes(secret), false);
+});
 
 test("formatGateway renders host and port", () => {
   assert.equal(
@@ -99,6 +203,22 @@ test("maintainer summary helpers expose action, gateway, and last error", () => 
   assert.equal(formatMaintainerAction(status), "relogin-page-bridge");
   assert.equal(formatMaintainerGateway(status), "198.51.100.20:9898");
   assert.equal(formatMaintainerLastError(status), "-");
+});
+
+test("maintainer and gateway probe text formatters redact embedded credentials", () => {
+  const secret = "secret-session-token";
+  assert.equal(formatMaintainerLastError({ lastError: `failed token=${secret}` }).includes(secret), false);
+  assert.equal(
+    formatGatewayProbeResults([
+      {
+        host: "203.0.113.10",
+        port: 9898,
+        reachable: false,
+        error: `failed {"sessionId":"${secret}"}`,
+      },
+    ]).includes(secret),
+    false,
+  );
 });
 
 test("formatRecoveryPlan renders an ordered human-readable plan", () => {

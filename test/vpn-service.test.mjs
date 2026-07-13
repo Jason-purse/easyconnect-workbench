@@ -3,6 +3,36 @@ import assert from "node:assert/strict";
 
 import { VpnService } from "../src/services/vpn-service.js";
 
+test("VpnService.getDebugTargets redacts remote-debug credentials at the service boundary", async () => {
+  const service = new VpnService({
+    runtimeFactory: () => ({
+      async getRemoteDebugTargets() {
+        return [
+          {
+            id: "page-1",
+            url: "https://gateway.example/portal/?twfid=twf-secret&token=url-secret",
+            webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/socket-secret",
+            sessionId: "full-session-secret",
+            token: "plain-token-secret",
+          },
+        ];
+      },
+    }),
+  });
+
+  const targets = await service.getDebugTargets({}, 9222);
+  const serialized = JSON.stringify(targets);
+  for (const secret of [
+    "twf-secret",
+    "url-secret",
+    "socket-secret",
+    "full-session-secret",
+    "plain-token-secret",
+  ]) {
+    assert.equal(serialized.includes(secret), false, `${secret} must be redacted`);
+  }
+});
+
 test("VpnService.getSnapshot reuses one runtime and returns combined status/info", async () => {
   const calls = [];
   const fakeRuntime = {

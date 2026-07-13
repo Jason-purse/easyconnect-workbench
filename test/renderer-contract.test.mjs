@@ -6,6 +6,7 @@ const requiredIds = [
   "view-overview",
   "view-activity",
   "settings-drawer",
+  "settings-feedback",
   "open-settings",
   "close-settings",
   "connection-primary-action",
@@ -35,6 +36,41 @@ test("renderer behavior has no toast overlay or renderer-owned autostart", async
   assert.match(source, /deriveMaintainerView/);
   assert.match(source, /removeAttribute\(["']inert["']\)/);
   assert.match(source, /setAttribute\(["']inert["']/);
+  assert.match(source, /appShell.*setAttribute\(["']inert["']/s);
+  assert.match(source, /trapSettingsFocus/);
+  assert.match(source, /sanitizeVpnStatusForDisplay/);
+  assert.match(source, /deriveMaintainerActivity/);
+  assert.match(source, /currentConnectionAction === null/);
+});
+
+test("settings drawer is modal and keeps save feedback inside the drawer", async () => {
+  const html = await readFile("src/renderer/index.html", "utf8");
+  const source = await readFile("src/renderer/app.js", "utf8");
+  assert.match(html, /id=["']settings-drawer["'][^>]+role=["']dialog["'][^>]+aria-modal=["']true["']/s);
+  assert.match(html, /id=["']settings-feedback["'][^>]+role=["']status["']/s);
+
+  const saveConfigSource = source.match(/async function saveConfig\(\)[\s\S]*?\n}\n\nasync function launchClient/)?.[0] ?? "";
+  assert.match(saveConfigSource, /showSettingsFeedback/);
+  assert.doesNotMatch(saveConfigSource, /closeSettings/);
+});
+
+test("tray start and dynamic diagnostics cannot bypass shared guards", async () => {
+  const mainSource = await readFile("src/main.js", "utf8");
+  const rendererSource = await readFile("src/renderer/app.js", "utf8");
+
+  const trayStartSource =
+    mainSource.match(/async function startMaintainerFromTray\(\)[\s\S]*?\n}\n\nfunction updateTrayMenu/)?.[0] ?? "";
+  const trayUpdateSource =
+    mainSource.match(/function updateTrayMenu\(\)[\s\S]*?\n}\n\nfunction startTray/)?.[0] ?? "";
+
+  assert.match(trayStartSource, /startMaintainerWithQuietHoursGuard/);
+  assert.match(trayUpdateSource, /getMaintainerStatusWithQuietHours/);
+  assert.match(rendererSource, /function renderDiagnosticResult/);
+  assert.match(rendererSource, /sanitizeDiagnosticValueForDisplay/);
+  assert.doesNotMatch(
+    rendererSource,
+    /setNodeText\(elements\.diagnosticResult,\s*safeStringify\(result\)\)/,
+  );
 });
 
 test("visual source avoids disallowed decorative patterns", async () => {

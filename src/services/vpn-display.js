@@ -6,6 +6,145 @@ export function formatGateway(gateway) {
   return `${gateway.host}:${gateway.port}`;
 }
 
+export function formatSessionId(sessionId) {
+  const value = `${sessionId ?? ""}`.trim();
+  if (!value) {
+    return "-";
+  }
+
+  if (value.length <= 8) {
+    return `${value.slice(0, 2)}…${value.slice(-2)}`;
+  }
+
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+
+export function sanitizeDiagnosticTextForDisplay(value = "") {
+  return `${value}`
+    .replace(
+      /("(?:twfid|token|session(?:id)?|cookie|password|secret|websocketdebuggerurl)"\s*:\s*")[^"]*(")/gi,
+      "$1<redacted>$2",
+    )
+    .replace(/((?:twfid|token|session(?:id)?|cookie)=)[^&\s]+/gi, "$1<redacted>")
+    .replace(/\b[a-fA-F0-9]{16,64}\b/g, "<hex>");
+}
+
+function sanitizeDiagnosticText(value) {
+  return value === null || value === undefined ? null : sanitizeDiagnosticTextForDisplay(value);
+}
+
+function isSensitiveDiagnosticKey(key = "") {
+  const normalized = `${key}`.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return /token|twfid|sessionid|cookie|password|secret|websocketdebuggerurl/.test(normalized);
+}
+
+export function sanitizeDiagnosticValueForDisplay(value, key = "") {
+  if (isSensitiveDiagnosticKey(key)) {
+    return "<redacted>";
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeDiagnosticValueForDisplay(item));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [
+        childKey,
+        sanitizeDiagnosticValueForDisplay(childValue, childKey),
+      ]),
+    );
+  }
+
+  return typeof value === "string" ? sanitizeDiagnosticTextForDisplay(value) : value;
+}
+
+export function sanitizeVpnStatusForDisplay(status = {}) {
+  const officialUi = status?.officialUi;
+  return {
+    loginStatus: status?.loginStatus ? { status: status.loginStatus.status ?? null } : null,
+    activeSession: status?.activeSession?.sessionId
+      ? { sessionId: formatSessionId(status.activeSession.sessionId) }
+      : null,
+    serviceState: status?.serviceState
+      ? {
+          base: status.serviceState.base ?? null,
+          l3vpn: status.serviceState.l3vpn ?? null,
+          tcp: status.serviceState.tcp ?? null,
+        }
+      : null,
+    officialUi: officialUi
+      ? {
+          reachable: officialUi.reachable ?? null,
+          primaryKind: officialUi.primaryTarget?.kind ?? officialUi.primaryKind ?? null,
+          hasServiceTarget: Boolean(officialUi.hasServiceTarget),
+          hasVisibleServiceTarget: Boolean(officialUi.hasVisibleServiceTarget),
+          hasBlockingVisibleTarget: Boolean(officialUi.hasBlockingVisibleTarget),
+          hasBlockingNativeAlert: Boolean(officialUi.hasBlockingNativeAlert),
+          needsNativeWindowRestore: Boolean(officialUi.needsNativeWindowRestore),
+          hasDuplicateNativeWindows: Boolean(officialUi.hasDuplicateNativeWindows),
+        }
+      : null,
+    error: sanitizeDiagnosticText(status?.error),
+  };
+}
+
+export function sanitizeMaintainerStatusForDisplay(status = {}) {
+  const event = status?.lastEvent;
+  const result = event?.result;
+  return {
+    running: Boolean(status?.running),
+    gateway: normalizeGateway(status?.gateway),
+    intervalSeconds: status?.intervalSeconds ?? null,
+    cycleTimeoutMs: status?.cycleTimeoutMs ?? null,
+    startedAt: status?.startedAt ?? null,
+    stoppedAt: status?.stoppedAt ?? null,
+    cycleCount: status?.cycleCount ?? 0,
+    currentPhase: status?.currentPhase ?? null,
+    phaseUpdatedAt: status?.phaseUpdatedAt ?? null,
+    lastEventAt: status?.lastEventAt ?? null,
+    lastError: sanitizeDiagnosticText(status?.lastError),
+    quietHours: status?.quietHours
+      ? {
+          active: Boolean(status.quietHours.active),
+          start: status.quietHours.start ?? null,
+          end: status.quietHours.end ?? null,
+          resumeAt: status.quietHours.resumeAt ?? null,
+        }
+      : null,
+    lastEvent: event
+      ? {
+          ok: event.ok !== false,
+          error: sanitizeDiagnosticText(event.error),
+          code: event.code ?? null,
+          lastPhase: event.lastPhase ?? null,
+          result: result
+            ? {
+                action: result.action ?? null,
+                mode: result.mode ?? null,
+                gateway: normalizeGateway(result.gateway),
+                gatewayAttempts: Array.isArray(result.gatewayAttempts)
+                  ? result.gatewayAttempts.map((attempt) => ({
+                      gateway: attempt.gateway ?? null,
+                      ok: attempt.ok !== false,
+                      error: sanitizeDiagnosticText(attempt.error),
+                      code: attempt.code ?? null,
+                    }))
+                  : [],
+                officialUiRepair: result.officialUiRepair
+                  ? {
+                      action: result.officialUiRepair.action ?? null,
+                      reason: sanitizeDiagnosticText(result.officialUiRepair.reason),
+                      error: sanitizeDiagnosticText(result.officialUiRepair.error),
+                    }
+                  : null,
+              }
+            : null,
+        }
+      : null,
+  };
+}
+
 function normalizeGateway(gateway) {
   const host = `${gateway?.host ?? ""}`.trim();
   const port = Number.parseInt(`${gateway?.port ?? ""}`, 10) || "";
@@ -79,7 +218,7 @@ export function formatMaintainerGateway(status = {}) {
 }
 
 export function formatMaintainerLastError(status = {}) {
-  return status?.lastError ?? status?.lastEvent?.error ?? "-";
+  return sanitizeDiagnosticText(status?.lastError ?? status?.lastEvent?.error) ?? "-";
 }
 
 function formatGatewaySource(source) {
@@ -136,7 +275,7 @@ export function formatGatewayProbeResults(results = []) {
       } else {
         parts.push("不可达");
         if (item.error) {
-          parts.push(item.error);
+          parts.push(sanitizeDiagnosticTextForDisplay(item.error));
         }
       }
 

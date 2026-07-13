@@ -64,6 +64,12 @@ function sanitizeRemoteDebugOperationResult(result) {
 
     const next = {};
     for (const [key, value] of Object.entries(node)) {
+      const normalizedKey = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      if (/token|twfid|sessionid|cookie|password|secret|websocketdebuggerurl/.test(normalizedKey)) {
+        next[key] = "<redacted>";
+        continue;
+      }
+
       if (typeof value === "string") {
         next[key] = key.toLowerCase().includes("url") || key.toLowerCase() === "error"
           ? sanitizeDebugUrl(value)
@@ -2042,7 +2048,7 @@ export class VpnService {
 
   async getDebugTargets(config = {}, remoteDebugPort) {
     const runtime = this.createRuntime(config);
-    return runtime.getRemoteDebugTargets(remoteDebugPort);
+    return sanitizeRemoteDebugOperationResult(await runtime.getRemoteDebugTargets(remoteDebugPort));
   }
 
   async portalLogin(config = {}, username, password, remoteDebugPort) {

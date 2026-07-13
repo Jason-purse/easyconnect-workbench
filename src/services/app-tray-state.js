@@ -1,17 +1,9 @@
 import { describeMaintainerEvent } from "./vpn-status-labels.js";
+import { formatSessionId, sanitizeDiagnosticTextForDisplay } from "./vpn-display.js";
 
 function getEventResult(status = {}) {
   const result = status?.lastEvent?.result ?? {};
   return result.online ?? result;
-}
-
-function compactSessionId(sessionId) {
-  const value = `${sessionId ?? ""}`.trim();
-  if (!value) {
-    return "-";
-  }
-
-  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
 }
 
 function formatGateway(gateway) {
@@ -50,11 +42,29 @@ export function buildTrayStatusLabels(status = null) {
   }
 
   const eventDescription = describeMaintainerEvent(status.lastEvent);
+  const eventDetail = sanitizeDiagnosticTextForDisplay(eventDescription.detail);
   const eventResult = getEventResult(status);
   const onlineState = getOnlineState(status);
   const action = eventResult?.action ?? "-";
   const gateway = formatGateway(eventResult?.gateway ?? status.gateway);
-  const session = compactSessionId(onlineState.sessionId);
+  const session = formatSessionId(onlineState.sessionId);
+
+  if (status.quietHours?.active) {
+    const start = status.quietHours.start ?? "18:30";
+    const end = status.quietHours.end ?? "09:00";
+    return {
+      title: "EasyConnect: 静默时段",
+      detail: `${start} - ${end} 内不会自动恢复 VPN。`,
+      variant: "quiet",
+      gateway,
+      session,
+      action,
+      canStart: false,
+      canStop: Boolean(status.running),
+      running: Boolean(status.running),
+      online: onlineState.online,
+    };
+  }
 
   if (status.currentPhase) {
     return {
@@ -74,7 +84,7 @@ export function buildTrayStatusLabels(status = null) {
   if (onlineState.online) {
     return {
       title: "EasyConnect: 在线",
-      detail: eventDescription.detail || "VPN 已在线。",
+      detail: eventDetail || "VPN 已在线。",
       variant: "ok",
       gateway,
       session,
@@ -89,7 +99,7 @@ export function buildTrayStatusLabels(status = null) {
   if (eventDescription.variant === "error") {
     return {
       title: "EasyConnect: 离线 / 恢复失败",
-      detail: eventDescription.detail,
+      detail: eventDetail,
       variant: "error",
       gateway,
       session,
@@ -104,7 +114,7 @@ export function buildTrayStatusLabels(status = null) {
   if (status.running) {
     return {
       title: "EasyConnect: 守护运行中",
-      detail: eventDescription.detail || "后台守护已启动，等待下一轮探活或恢复结果。",
+      detail: eventDetail || "后台守护已启动，等待下一轮探活或恢复结果。",
       variant: eventDescription.variant,
       gateway,
       session,
@@ -118,7 +128,7 @@ export function buildTrayStatusLabels(status = null) {
 
   return {
     title: "EasyConnect: 守护已停止",
-    detail: eventDescription.detail || "自动守护未运行。",
+    detail: eventDetail || "自动守护未运行。",
     variant: "idle",
     gateway,
     session,

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import { ConfigStore, DEFAULT_CONFIG } from "../src/services/config-store.js";
 
@@ -38,6 +38,37 @@ test("ConfigStore ignores legacy platform credentials when loading old config", 
     assert.equal(loaded.app.launchAtLogin, true);
     assert.equal(loaded.vpn.username, "demo-user");
     assert.equal(Object.hasOwn(loaded, "portals"), false);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("ConfigStore removes legacy platform credentials from disk on the next save", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "easyconnect-workbench-config-"));
+  const configPath = path.join(tempDir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        app: { launchAtLogin: false },
+        vpn: { username: "demo-user" },
+        portals: {
+          build: { username: "legacy-build", password: "legacy-build-secret" },
+          release: { username: "legacy-release", password: "legacy-release-secret" },
+        },
+      }),
+    );
+
+    const store = new ConfigStore(tempDir);
+    const loaded = await store.load();
+    await store.save(loaded);
+
+    const persisted = JSON.parse(await readFile(configPath, "utf8"));
+    const serialized = JSON.stringify(persisted);
+    assert.equal(Object.hasOwn(persisted, "portals"), false);
+    assert.equal(serialized.includes("legacy-build-secret"), false);
+    assert.equal(serialized.includes("legacy-release-secret"), false);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

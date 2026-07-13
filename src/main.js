@@ -7,7 +7,11 @@ import { VpnMaintainer } from "./services/vpn-maintainer.js";
 import { runOfficialUiRepairSmoke } from "./services/vpn-official-ui-repair-smoke.js";
 import { applyGatewaySelectionHint, applyProbeHints, applySnapshotHints } from "./services/vpn-config-hints.js";
 import { mergeConfigForRender } from "./services/vpn-render-config.js";
-import { maybeStartMaintainerAutoStart } from "./services/vpn-autostart.js";
+import {
+  getMaintainerStatusWithQuietHours,
+  maybeStartMaintainerAutoStart,
+  startMaintainerWithQuietHoursGuard,
+} from "./services/vpn-autostart.js";
 import { buildTrayStatusLabels, buildTrayStatusSignature, buildTrayTooltip } from "./services/app-tray-state.js";
 import { createMaintainerLogger } from "./services/maintainer-log.js";
 import {
@@ -515,7 +519,10 @@ function runTrayAction(action) {
 
 async function startMaintainerFromTray() {
   const config = await configStore.load();
-  return vpnMaintainer.start(config);
+  return startMaintainerWithQuietHoursGuard({
+    config,
+    vpnMaintainer,
+  });
 }
 
 function updateTrayMenu() {
@@ -523,17 +530,22 @@ function updateTrayMenu() {
     return;
   }
 
-  const status = vpnMaintainer.getStatus();
-  const signature = buildTrayStatusSignature(status);
-  if (signature === trayStatusSignature) {
-    return;
-  }
+  void (async () => {
+    const config = await configStore.load();
+    const status = getMaintainerStatusWithQuietHours({
+      config,
+      status: vpnMaintainer.getStatus(),
+    });
+    const signature = buildTrayStatusSignature(status);
+    if (signature === trayStatusSignature) {
+      return;
+    }
 
-  trayStatusSignature = signature;
-  const labels = buildTrayStatusLabels(status);
-  appTray.setToolTip(buildTrayTooltip(status));
-  appTray.setContextMenu(
-    Menu.buildFromTemplate([
+    trayStatusSignature = signature;
+    const labels = buildTrayStatusLabels(status);
+    appTray.setToolTip(buildTrayTooltip(status));
+    appTray.setContextMenu(
+      Menu.buildFromTemplate([
       {
         label: labels.title,
         enabled: false,
@@ -600,8 +612,11 @@ function updateTrayMenu() {
           app.quit();
         },
       },
-    ]),
-  );
+      ]),
+    );
+  })().catch((error) => {
+    console.error("[tray] failed to refresh menu", error);
+  });
 }
 
 function startTrayRefresh() {
@@ -838,10 +853,18 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("vpn:maintainer-status", async () => vpnMaintainer.getStatus());
+  ipcMain.handle("vpn:maintainer-status", async () => {
+    const config = await configStore.load();
+    return getMaintainerStatusWithQuietHours({
+      config,
+      status: vpnMaintainer.getStatus(),
+    });
+  });
   ipcMain.handle("vpn:maintainer-start", async (_event, payload = {}) => {
     const config = await configStore.load();
-    const status = await vpnMaintainer.start(config, {
+    const status = await startMaintainerWithQuietHoursGuard({
+      config,
+      vpnMaintainer,
       gatewayCandidates: payload.gatewayCandidates ?? [],
     });
 

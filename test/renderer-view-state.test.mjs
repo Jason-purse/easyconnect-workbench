@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { deriveConnectionView, deriveMaintainerView } from "../src/renderer/view-state.js";
+import {
+  deriveConnectionView,
+  deriveMaintainerActivity,
+  deriveMaintainerView,
+  describeMaintainerStartResult,
+} from "../src/renderer/view-state.js";
 
 test("online state exposes refresh as the single primary action", () => {
   assert.deepEqual(
@@ -54,6 +59,141 @@ test("quiet hours are visible without enabling automatic recovery", () => {
   assert.equal(view.tone, "quiet");
   assert.equal(view.primaryAction, "refresh");
   assert.equal(view.primaryLabel, "立即检查");
+});
+
+test("authoritative quiet-hours state overrides running and stale events", () => {
+  const quietStatus = {
+    running: true,
+    quietHours: { active: true, start: "18:30", end: "09:00" },
+  };
+  assert.equal(
+    deriveConnectionView({
+      status: {},
+      environmentInfo: { appExecutableExists: true },
+      maintainerStatus: quietStatus,
+    }).primaryAction,
+    "refresh",
+  );
+  assert.equal(deriveMaintainerView({ maintainerStatus: quietStatus }).state, "quiet");
+  assert.equal(deriveMaintainerView({ maintainerStatus: quietStatus }).action, null);
+
+  const staleQuietEvent = {
+    running: false,
+    quietHours: { active: false, start: "18:30", end: "09:00" },
+    lastEvent: { result: { action: "keepalive-paused-quiet-hours" } },
+  };
+  assert.equal(
+    deriveConnectionView({
+      status: {},
+      environmentInfo: { appExecutableExists: true },
+      maintainerStatus: staleQuietEvent,
+    }).tone,
+    "offline",
+  );
+});
+
+test("recovering state disables the connection action", () => {
+  const view = deriveConnectionView({
+    status: {},
+    environmentInfo: { appExecutableExists: true },
+    maintainerStatus: { running: true, currentPhase: "official-renderer-login" },
+  });
+  assert.equal(view.tone, "progress");
+  assert.equal(view.primaryAction, null);
+  assert.equal(view.primaryLabel, "正在连接");
+});
+
+test("captcha and private-kick failures direct the user to the official client", () => {
+  for (const lastEvent of [
+    { ok: false, error: "Gateway requires captcha; automatic password login is blocked" },
+    { ok: false, code: "EASYCONNECT_PRIVATE_KICK", error: "same user login" },
+  ]) {
+    const view = deriveConnectionView({
+      status: {},
+      environmentInfo: { appExecutableExists: true },
+      maintainerStatus: { running: true, lastEvent },
+    });
+    assert.equal(view.tone, "warning");
+    assert.equal(view.primaryAction, "launch-client");
+    assert.equal(view.primaryLabel, "打开官方客户端");
+  }
+});
+
+test("local readiness failures wait for the next maintainer check instead of starting another recovery", () => {
+  const view = deriveConnectionView({
+    status: {},
+    environmentInfo: { appExecutableExists: true },
+    maintainerStatus: {
+      running: true,
+      lastEvent: {
+        ok: false,
+        code: "EASYCONNECT_LOCAL_SERVICE_NOT_READY",
+        error: "local service not ready",
+      },
+    },
+  });
+  assert.equal(view.tone, "warning");
+  assert.equal(view.primaryAction, "refresh");
+  assert.equal(view.primaryLabel, "重新检查");
+});
+
+test("deriveMaintainerActivity records each completed maintainer event once", () => {
+  const maintainerStatus = {
+    lastEventAt: "2026-07-13T02:00:00.000Z",
+    lastEvent: { ok: true, result: { action: "already-online" } },
+  };
+  const first = deriveMaintainerActivity({ maintainerStatus, previousEventAt: null });
+  assert.equal(first.eventAt, maintainerStatus.lastEventAt);
+  assert.equal(first.title, "保持在线");
+  assert.equal(first.tone, "ok");
+  assert.equal(
+    deriveMaintainerActivity({
+      maintainerStatus,
+      previousEventAt: maintainerStatus.lastEventAt,
+    }),
+    null,
+  );
+});
+
+test("deriveMaintainerActivity redacts credentials from failure details", () => {
+  const secret = "secret-session-token";
+  const activity = deriveMaintainerActivity({
+    maintainerStatus: {
+      lastEventAt: "2026-07-13T02:00:00.000Z",
+      lastEvent: { ok: false, error: `failed {"token":"${secret}"}` },
+    },
+  });
+
+  assert.equal(activity.detail.includes(secret), false);
+});
+
+test("suppressed maintainer starts are presented as quiet hours instead of success", () => {
+  assert.deepEqual(
+    describeMaintainerStartResult({
+      running: false,
+      startSuppressed: true,
+      quietHours: { active: true, start: "18:30", end: "09:00" },
+    }),
+    {
+      title: "静默时段",
+      detail: "18:30 - 09:00 内不会启动自动恢复。静默时段结束后可再次启动。",
+      tone: "warning",
+    },
+  );
+});
+
+test("a successful maintainer start is not reported as failed when status refresh fails", () => {
+  assert.deepEqual(
+    describeMaintainerStartResult(
+      { running: true, quietHours: { active: false } },
+      { refreshError: new Error("status refresh timed out") },
+    ),
+    {
+      title: "自动守护已启动",
+      detail: "守护已经启动，但状态刷新失败：status refresh timed out",
+      tone: "warning",
+    },
+  );
 });
 
 test("maintainer view distinguishes running, quiet, and stopped", () => {

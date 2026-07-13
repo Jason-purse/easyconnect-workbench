@@ -1,5 +1,38 @@
 import { getQuietHoursState } from "./vpn-maintainer.js";
 
+export function getMaintainerStatusWithQuietHours({ config = {}, status = {}, nowMs = Date.now() } = {}) {
+  return {
+    ...status,
+    quietHours: getQuietHoursState(config, nowMs),
+  };
+}
+
+export async function startMaintainerWithQuietHoursGuard({
+  config = {},
+  vpnMaintainer,
+  gatewayCandidates = [],
+  nowMs = Date.now(),
+} = {}) {
+  if (!vpnMaintainer) {
+    throw new Error("startMaintainerWithQuietHoursGuard requires vpnMaintainer");
+  }
+
+  const currentStatus = getMaintainerStatusWithQuietHours({
+    config,
+    status: vpnMaintainer.getStatus?.() ?? {},
+    nowMs,
+  });
+  if (currentStatus.quietHours.active) {
+    return {
+      ...currentStatus,
+      startSuppressed: true,
+    };
+  }
+
+  const status = await vpnMaintainer.start(config, { gatewayCandidates });
+  return getMaintainerStatusWithQuietHours({ config, status, nowMs });
+}
+
 function scheduleQuietHoursResume(callback, delayMs) {
   const timer = setTimeout(() => {
     void callback();
