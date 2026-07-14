@@ -21,6 +21,7 @@ const OFFICIAL_UI_PROBE_EXPRESSION = `(() => ({
   bodyText: (document.body && document.body.innerText || "").slice(0, 800)
 }))()`;
 const BACKGROUND_NATIVE_WINDOW_ACTIVATION_SKIPPED_ACTION = "skip-native-window-activation-background";
+const DEFAULT_NATIVE_WINDOW_SHOW_SETTLE_MS = 5000;
 
 function getRemoteDebugPort(config = {}) {
   return Number.parseInt(`${config?.vpn?.remoteDebugPort ?? 9222}`, 10) || 9222;
@@ -321,6 +322,23 @@ function buildOfficialUiTransitionClosePlan(officialUi = {}, context = {}) {
   }));
 }
 
+function buildOfficialUiStaleConnectClosePlan(officialUi = {}) {
+  if (!officialUi.hasVisibleServiceTarget) {
+    return [];
+  }
+
+  return (officialUi.targets ?? [])
+    .filter((target) => target.id && target.kind === "connect" && target.visible)
+    .slice(0, 1)
+    .map((target) => ({
+      id: target.id,
+      kind: "stale-connect",
+      title: target.title,
+      url: target.url,
+      originalKind: target.kind,
+    }));
+}
+
 function uniqueCloseTargets(targets = []) {
   const seen = new Set();
   return targets.filter((target) => {
@@ -351,6 +369,7 @@ function buildOfficialUiResidualClosePlan(officialUi = {}, context = {}) {
 
   return uniqueCloseTargets([
     ...residualTargets,
+    ...buildOfficialUiStaleConnectClosePlan(officialUi),
     ...buildOfficialUiTransitionClosePlan(officialUi, context),
     ...buildOfficialUiDuplicateServiceClosePlan(officialUi, context),
   ]);
@@ -471,9 +490,9 @@ function officialUiRequiresNativeWindowActivation(officialUi = {}) {
   );
 }
 
-function closePlanIsOnlyDuplicateServices(closeResidualTargets = []) {
+function closePlanIsOnlyBackgroundSafeTargets(closeResidualTargets = []) {
   return closeResidualTargets.length > 0 &&
-    closeResidualTargets.every((target) => target.kind === "duplicate-service");
+    closeResidualTargets.every((target) => ["duplicate-service", "stale-connect"].includes(target.kind));
 }
 
 function officialUiOnlyNeedsNativeWindowActivation(officialUi = {}, context = {}) {
@@ -496,7 +515,7 @@ function officialUiRepairShouldDeferToForeground(officialUi = {}, context = {}) 
     return true;
   }
 
-  return !closePlanIsOnlyDuplicateServices(context.closeResidualTargets ?? []) ||
+  return !closePlanIsOnlyBackgroundSafeTargets(context.closeResidualTargets ?? []) ||
     (context.residualTargets ?? []).length > 0;
 }
 
@@ -622,10 +641,14 @@ async function buildPostRepairStatus(runtime, remoteDebugPort, onlineStatus = {}
 async function buildSettledPostRepairStatus(runtime, remoteDebugPort, onlineStatus = {}, options = {}) {
   const immediateStatus = await buildPostRepairStatus(runtime, remoteDebugPort, onlineStatus);
   const settleMs = Number.parseInt(`${options.postRepairSettleMs ?? 0}`, 10) || 0;
-  if (settleMs <= 0 || !officialUiIsServiceConsistent(immediateStatus.officialUi)) {
+  const settleState = options.settleState ?? null;
+  if (settleMs <= 0 || settleState?.used) {
     return immediateStatus;
   }
 
+  if (settleState) {
+    settleState.used = true;
+  }
   const delayFn = options.delayFn ?? ((ms) => new Promise((resolve) => {
     setTimeout(resolve, ms);
   }));
@@ -716,6 +739,21 @@ async function navigateOfficialUiToLoginFallback(runtime, officialUi = {}, gatew
 }
 
 async function buildIncompleteOfficialUiRestoreResultWithFallback(runtime, gateway, action, reason, payload = {}, status = {}, options = {}) {
+  if (options.allowLoginFallbackNavigation === false) {
+    return buildIncompleteOfficialUiRestoreResultWithSafeFallback(
+      action,
+      reason,
+      payload,
+      status,
+      {
+        action: "skip-official-ui-login-fallback-disabled",
+        reason: "This repair run is not allowed to navigate EasyConnect back to the login page.",
+        primaryTarget: summarizeRepairSourceTarget(status?.officialUi?.primaryTarget ?? null),
+        nativeWindowState: status?.officialUi?.nativeWindowState ?? null,
+      },
+    );
+  }
+
   if (shouldSkipLoginFallbackForBackgroundNativeRepair(status?.officialUi, options)) {
     return buildIncompleteOfficialUiRestoreResultWithSafeFallback(
       action,
@@ -1056,7 +1094,16 @@ async function navigateServiceRestoreTarget(runtime, candidates = [], serviceUrl
 }
 
 async function retryMissingServiceRestore(runtime, officialUi, serviceUrl, serviceTargetUrlPart, context, options = {}) {
-  const { remoteDebugPort, portalTimeoutMs, pollMs, onlineStatus, postRepairSettleMs, delayFn, allowNativeWindowActivation } = options;
+  const {
+    remoteDebugPort,
+    portalTimeoutMs,
+    pollMs,
+    onlineStatus,
+    postRepairSettleMs,
+    settleState,
+    delayFn,
+    allowNativeWindowActivation,
+  } = options;
   const restoreTargets = buildOfficialUiServiceRestorePlan(officialUi);
   const restore = await navigateServiceRestoreTarget(runtime, restoreTargets, serviceUrl, {
     remoteDebugPort,
@@ -1097,6 +1144,7 @@ async function retryMissingServiceRestore(runtime, officialUi, serviceUrl, servi
     ...serviceRefresh,
     status: await buildSettledPostRepairStatus(runtime, remoteDebugPort, onlineStatus, {
       postRepairSettleMs,
+      settleState,
       delayFn,
     }),
   };
@@ -1446,8 +1494,10 @@ export class VpnService {
     const knownOnlineStatus = options.knownOnlineStatus ?? null;
     const focusServiceTarget = options.focusServiceTarget ?? false;
     const allowNativeWindowActivation = options.allowNativeWindowActivation ?? true;
+    const allowLoginFallbackNavigation = options.allowLoginFallbackNavigation ?? true;
     const onlineAction = options.onlineAction ?? null;
     const postRepairSettleMs = getOfficialUiPostRepairSettleMs(config, options);
+    const postRepairSettleState = { used: false };
     const statusSnapshot = await this.getSnapshot(config);
     const status = statusSnapshot.status;
 
@@ -1536,6 +1586,7 @@ export class VpnService {
       });
       const postRepairStatus = await buildSettledPostRepairStatus(runtime, remoteDebugPort, onlineStatus, {
         postRepairSettleMs,
+        settleState: postRepairSettleState,
         delayFn: this.delayFn,
       });
       const commonResult = {
@@ -1564,6 +1615,7 @@ export class VpnService {
             remoteDebugPort,
             timeoutMs: 5000,
             allowNativeWindowActivation,
+            allowLoginFallbackNavigation,
           },
         );
       }
@@ -1602,6 +1654,7 @@ export class VpnService {
             remoteDebugPort,
             timeoutMs: 5000,
             allowNativeWindowActivation,
+            allowLoginFallbackNavigation,
           },
         );
       }
@@ -1632,6 +1685,7 @@ export class VpnService {
             remoteDebugPort,
             timeoutMs: 5000,
             allowNativeWindowActivation,
+            allowLoginFallbackNavigation,
           },
         );
       }
@@ -1657,6 +1711,7 @@ export class VpnService {
       });
       const postRepairStatus = await buildSettledPostRepairStatus(runtime, remoteDebugPort, onlineStatus, {
         postRepairSettleMs,
+        settleState: postRepairSettleState,
         delayFn: this.delayFn,
       });
       const restoreAction = officialUi?.hasServiceTarget ? "restore-hidden-service-target" : "restore-missing-service-target";
@@ -1680,7 +1735,7 @@ export class VpnService {
         ...serviceRefresh,
       };
 
-      if (!officialUi?.hasServiceTarget && !officialUiIsServiceConsistent(postRepairStatus.officialUi)) {
+      if (!officialUiIsServiceConsistent(postRepairStatus.officialUi)) {
         const retry = await retryMissingServiceRestore(
           runtime,
           postRepairStatus.officialUi,
@@ -1693,6 +1748,7 @@ export class VpnService {
             pollMs,
             onlineStatus,
             postRepairSettleMs,
+            settleState: postRepairSettleState,
             delayFn: this.delayFn,
             allowNativeWindowActivation,
           },
@@ -1721,6 +1777,7 @@ export class VpnService {
             remoteDebugPort,
             timeoutMs: 5000,
             allowNativeWindowActivation,
+            allowLoginFallbackNavigation,
           },
         );
       }
@@ -1783,9 +1840,12 @@ export class VpnService {
         timeoutMs: 5000,
         allowNativeWindowActivation: nativeWindowActivationAllowed,
       });
-
-      return {
-        action: "repair-official-ui",
+      const postRepairStatus = await buildSettledPostRepairStatus(runtime, remoteDebugPort, onlineStatus, {
+        postRepairSettleMs: Math.max(postRepairSettleMs, DEFAULT_NATIVE_WINDOW_SHOW_SETTLE_MS),
+        settleState: postRepairSettleState,
+        delayFn: this.delayFn,
+      });
+      const commonResult = {
         gateway,
         serviceUrl,
         from: primaryTarget
@@ -1800,7 +1860,29 @@ export class VpnService {
         repairedResidualTargets: [],
         focusedServiceTarget: null,
         shownOfficialWindow,
-        status,
+      };
+
+      if (!officialUiIsServiceConsistent(postRepairStatus.officialUi)) {
+        return await buildIncompleteOfficialUiRestoreResultWithFallback(
+          runtime,
+          gateway,
+          "repair-official-ui-incomplete",
+          "Official UI repair attempted to show the EasyConnect service window, but the native window did not converge to a usable state.",
+          commonResult,
+          postRepairStatus,
+          {
+            remoteDebugPort,
+            timeoutMs: 5000,
+            allowNativeWindowActivation,
+            allowLoginFallbackNavigation: false,
+          },
+        );
+      }
+
+      return {
+        action: "repair-official-ui",
+        ...commonResult,
+        status: postRepairStatus,
       };
     }
 
@@ -1847,6 +1929,7 @@ export class VpnService {
       : null;
     const postRepairStatus = await buildSettledPostRepairStatus(runtime, remoteDebugPort, onlineStatus, {
       postRepairSettleMs,
+      settleState: postRepairSettleState,
       delayFn: this.delayFn,
     });
     const commonResult = {
@@ -1868,6 +1951,54 @@ export class VpnService {
       shownOfficialWindow,
       focusedServiceTarget,
     };
+    const failedResidualCloses = closedResidualTargets.filter((target) => target?.result?.ok !== true);
+    const remainingStaleConnectTargets = buildOfficialUiStaleConnectClosePlan(postRepairStatus.officialUi);
+
+    if (failedResidualCloses.length > 0 || remainingStaleConnectTargets.length > 0) {
+      return await buildIncompleteOfficialUiRestoreResultWithFallback(
+        runtime,
+        gateway,
+        "repair-official-ui-incomplete",
+        "Official UI repair could not close all residual EasyConnect targets.",
+        {
+          ...commonResult,
+          failedResidualCloses,
+          remainingStaleConnectTargets,
+        },
+        postRepairStatus,
+        {
+          remoteDebugPort,
+          timeoutMs: 5000,
+          allowNativeWindowActivation,
+          allowLoginFallbackNavigation,
+        },
+      );
+    }
+
+    const postRepairCloseTargets = buildOfficialUiResidualClosePlan(
+      postRepairStatus.officialUi,
+      repairContext,
+    );
+    const postRepairResidualTargets = buildOfficialUiResidualRepairPlan(postRepairStatus.officialUi);
+    if (
+      !nativeWindowActivationAllowed &&
+      officialUiOnlyNeedsNativeWindowActivation(postRepairStatus.officialUi, {
+        closeResidualTargets: postRepairCloseTargets,
+        residualTargets: postRepairResidualTargets,
+      })
+    ) {
+      return {
+        ...buildBackgroundNativeWindowActivationSkippedResult({
+          gateway,
+          serviceUrl,
+          primaryTarget: postRepairStatus.officialUi?.primaryTarget ?? null,
+          officialUi: postRepairStatus.officialUi,
+          status: postRepairStatus,
+        }),
+        ...commonResult,
+        status: postRepairStatus,
+      };
+    }
 
     if (!officialUiIsServiceConsistent(postRepairStatus.officialUi)) {
       const retry = await retryMissingServiceRestore(
@@ -1882,6 +2013,7 @@ export class VpnService {
           pollMs,
           onlineStatus,
           postRepairSettleMs,
+          settleState: postRepairSettleState,
           delayFn: this.delayFn,
           allowNativeWindowActivation: nativeWindowActivationAllowed,
         },
@@ -1910,6 +2042,7 @@ export class VpnService {
             remoteDebugPort,
             timeoutMs: 5000,
             allowNativeWindowActivation,
+            allowLoginFallbackNavigation,
           },
         );
       }
@@ -1927,6 +2060,38 @@ export class VpnService {
     const timeoutMs = options.timeoutMs ?? 5000;
     const pollMs = options.pollMs ?? 500;
     const targetUrl = buildLocalConnectTargetUrl(runtime.appExecutable);
+
+    const findPreparedTarget = async () => {
+      if (
+        typeof runtime?.getRemoteDebugTargets !== "function" ||
+        typeof runtime?.evaluateOnRemoteDebugPageTarget !== "function"
+      ) {
+        return null;
+      }
+
+      const officialUi = await describeOfficialUiState(runtime, remoteDebugPort);
+      return (officialUi.targets ?? []).find(
+        (target) => target.id && ["connect", "probe-failed"].includes(target.kind),
+      ) ?? null;
+    };
+
+    const buildPreparedTargetResult = (target, extra = {}) => ({
+      action: "prepared-test-target",
+      targetUrl,
+      target: {
+        id: target.id ?? null,
+        type: target.type ?? null,
+        url: sanitizeDebugUrl(target.url ?? targetUrl),
+      },
+      ...extra,
+    });
+
+    const existingTarget = await findPreparedTarget().catch(() => null);
+    if (existingTarget) {
+      return buildPreparedTargetResult(existingTarget, {
+        reusedExistingTarget: true,
+      });
+    }
 
     const resolveMutationSource = async () => {
       if (
@@ -2020,18 +2185,22 @@ export class VpnService {
         timeoutMs,
       });
 
-      return {
-        action: "prepared-test-target",
-        targetUrl,
-        target: target
-          ? {
-              id: target.id ?? null,
-              type: target.type ?? null,
-              url: sanitizeDebugUrl(target.url ?? targetUrl),
-            }
-          : null,
-      };
+      return target
+        ? buildPreparedTargetResult(target, { reusedExistingTarget: false })
+        : {
+            action: "skip-no-test-target",
+            reason: "DevTools target creation returned no target.",
+            targetUrl,
+          };
     } catch (error) {
+      const partiallyCreatedTarget = await findPreparedTarget().catch(() => null);
+      if (partiallyCreatedTarget) {
+        return buildPreparedTargetResult(partiallyCreatedTarget, {
+          prepareReason: error?.message ?? String(error),
+          reusedExistingTarget: false,
+        });
+      }
+
       return prepareViaServiceTargetMutation(error?.message ?? String(error));
     }
   }

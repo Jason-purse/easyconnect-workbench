@@ -30,8 +30,11 @@
 
 html,
 body {
-  min-height: 100%;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   margin: 0;
+  overflow: hidden;
 }
 
 body {
@@ -89,7 +92,12 @@ input[type="checkbox"] {
 }
 
 .app-shell {
-  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
   color: var(--color-ink);
   background: var(--color-bg);
 }
@@ -245,13 +253,18 @@ input[type="checkbox"] {
 }
 
 .app-content {
-  width: min(100%, 1040px);
-  margin: 0 auto;
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 24px;
 }
 
 .app-view {
   display: none;
+  width: min(100%, max(992px, 72vw));
+  margin: 0 auto;
 }
 
 .app-view.is-active {
@@ -711,7 +724,7 @@ input[type="checkbox"] {
   top: 0;
   right: 0;
   width: min(420px, calc(100vw - 32px));
-  height: 100vh;
+  height: 100dvh;
   overflow: auto;
   transform: translateX(100%);
   border-left: 1px solid var(--color-line);
@@ -964,6 +977,46 @@ input[type="checkbox"] {
   .directory-actions {
     display: grid;
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-height: 760px) {
+  .app-content {
+    padding-block: 12px;
+  }
+
+  .connection-band {
+    gap: 16px;
+    padding-block: 16px;
+  }
+
+  .summary-strip > div {
+    padding-block: 12px;
+  }
+
+  .section-block,
+  .section-block + .section-block {
+    padding-block: 18px;
+  }
+
+  .detail-list {
+    margin-top: 12px;
+  }
+
+  .detail-list > div {
+    padding-block: 8px;
+  }
+
+  .activity-preview {
+    padding-top: 14px;
+  }
+
+  .activity-list {
+    margin-top: 10px;
+  }
+
+  .activity-item {
+    padding-block: 9px;
   }
 }
 

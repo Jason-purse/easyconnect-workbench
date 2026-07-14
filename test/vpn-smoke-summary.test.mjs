@@ -148,6 +148,52 @@ test("assertMaintainerOnline accepts restored official service target repair act
   });
 });
 
+test("assertMaintainerOnline accepts background native-window fail-closed policy", () => {
+  const status = {
+    lastEvent: {
+      ok: true,
+      result: {
+        action: "already-online",
+        activeSession: {
+          sessionId: "session-native-hidden",
+        },
+        loginStatus: {
+          status: "1",
+        },
+        officialUiRepair: {
+          action: "skip-native-window-activation-background",
+          reason: "Background official UI maintenance will not activate native windows.",
+        },
+      },
+    },
+  };
+
+  assert.equal(assertMaintainerOnline(status, "VPN autostart"), status);
+});
+
+test("assertMaintainerOnline reports the tunnel online when official UI repair is incomplete", () => {
+  const status = {
+    lastEvent: {
+      ok: true,
+      result: {
+        action: "already-online",
+        activeSession: {
+          sessionId: "session-ui-incomplete",
+        },
+        loginStatus: {
+          status: "1",
+        },
+        officialUiRepair: {
+          action: "repair-official-ui-incomplete",
+          reason: "The native window did not converge.",
+        },
+      },
+    },
+  };
+
+  assert.equal(assertMaintainerOnline(status, "VPN autostart"), status);
+});
+
 test("assertMaintainerRecoveredFromOffline requires a real recovery action and healthy services", () => {
   const status = {
     lastEvent: {
@@ -180,6 +226,36 @@ test("assertMaintainerRecoveredFromOffline requires a real recovery action and h
 
   assert.equal(assertMaintainerRecoveredFromOffline(status, "VPN offline recovery"), status);
 });
+
+for (const officialUiRepairAction of ["repair-official-ui-incomplete", "repair-error"]) {
+  test(`assertMaintainerRecoveredFromOffline keeps UI outcome ${officialUiRepairAction} separate from VPN health`, () => {
+    const status = {
+      lastEvent: {
+        ok: true,
+        result: {
+          action: "relogin-page-bridge",
+          activeSession: {
+            sessionId: "session-recovered-with-ui-warning",
+          },
+          loginStatus: {
+            status: "1",
+          },
+          serviceState: {
+            base: "18",
+            l3vpn: "18",
+            tcp: "43",
+          },
+          officialUiRepair: {
+            action: officialUiRepairAction,
+            reason: "The native window did not converge.",
+          },
+        },
+      },
+    };
+
+    assert.equal(assertMaintainerRecoveredFromOffline(status, "VPN offline recovery"), status);
+  });
+}
 
 test("assertMaintainerRecoveredFromOffline rejects already-online cycles", () => {
   const status = {

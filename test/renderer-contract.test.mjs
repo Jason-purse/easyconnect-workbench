@@ -128,3 +128,22 @@ test("visual source avoids disallowed decorative patterns", async () => {
   assert.match(css, /--color-warning:/);
   assert.match(css, /--color-danger:/);
 });
+
+test("default window and renderer constrain scrolling to the remaining viewport", async () => {
+  const mainSource = await readFile("src/main.js", "utf8");
+  const css = await readFile("src/renderer/tailwind.css", "utf8");
+
+  assert.match(mainSource, /calculateInitialWindowBounds/);
+  assert.match(mainSource, /screen\.getDisplayNearestPoint\(screen\.getCursorScreenPoint\(\)\)/);
+
+  const shellSource = css.match(/\.app-shell\s*\{[\s\S]*?\n\}/)?.[0] ?? "";
+  const contentSource = css.match(/\.app-content\s*\{[\s\S]*?\n\}/)?.[0] ?? "";
+  const viewSource = css.match(/\.app-view\s*\{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(shellSource, /height:\s*100dvh/);
+  assert.match(shellSource, /grid-template-rows:\s*auto auto minmax\(0,\s*1fr\)/);
+  assert.match(shellSource, /overflow:\s*hidden/);
+  assert.match(contentSource, /min-height:\s*0/);
+  assert.match(contentSource, /overflow-y:\s*auto/);
+  assert.match(viewSource, /width:\s*min\(100%,\s*max\(992px,\s*72vw\)\)/);
+  assert.match(css, /@media\s*\(max-height:\s*760px\)/);
+});

@@ -109,7 +109,13 @@ test("runOfficialUiRepairSmoke prepares a safe abnormal target and validates the
       };
     },
     async repairOfficialUi(config, options) {
-      calls.push(["repairOfficialUi", config, options.remoteDebugPort]);
+      calls.push([
+        "repairOfficialUi",
+        config,
+        options.remoteDebugPort,
+        options.postRepairSettleMs,
+        options.allowLoginFallbackNavigation,
+      ]);
       return {
         action: "repair-official-ui",
         from: { kind: "connect" },
@@ -133,6 +139,17 @@ test("runOfficialUiRepairSmoke prepares a safe abnormal target and validates the
   assert.equal(result.repair.action, "repair-official-ui");
   assert.equal(result.repair.bridge.token, undefined);
   assert.equal(result.repair.serviceSync.token, undefined);
+  assert.deepEqual(calls.find((call) => Array.isArray(call) && call[0] === "repairOfficialUi"), [
+    "repairOfficialUi",
+    {
+      vpn: {
+        remoteDebugPort: 9333,
+      },
+    },
+    9333,
+    5000,
+    false,
+  ]);
   assert.deepEqual(
     calls.map((call) => (Array.isArray(call) ? call[0] : call)),
     ["getSnapshot", "prepareOfficialUiRepairSmokeTarget", "repairOfficialUi"],
@@ -182,7 +199,7 @@ test("runOfficialUiRepairSmoke accepts a controlled service-target mutation as r
   );
 });
 
-test("runOfficialUiRepairSmoke returns a clear skip when no safe test target can be created", async () => {
+test("runOfficialUiRepairSmoke rejects a skipped repair when exercise is required", async () => {
   const calls = [];
   const vpnService = {
     async getSnapshot() {
@@ -213,6 +230,21 @@ test("runOfficialUiRepairSmoke returns a clear skip when no safe test target can
 
   assert.equal(result.action, "skip-no-test-target");
   assert.match(result.reason, /unavailable/i);
+  assert.deepEqual(calls, ["getSnapshot", "prepareOfficialUiRepairSmokeTarget"]);
+
+  calls.length = 0;
+  await assert.rejects(
+    runOfficialUiRepairSmoke({
+      vpnService,
+      config: {},
+      requireExercise: true,
+    }),
+    (error) => {
+      assert.match(error.message, /did not exercise official UI repair/i);
+      assert.equal(error.repair?.action, "skip-no-test-target");
+      return true;
+    },
+  );
   assert.deepEqual(calls, ["getSnapshot", "prepareOfficialUiRepairSmokeTarget"]);
 });
 

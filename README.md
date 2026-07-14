@@ -70,6 +70,8 @@ EASYCONNECT_VERIFY_GATEWAYS="vpn.example.com:9898" npm run verify:mvp-installed
 
 This command can stop and restart the installed Workbench app while verifying lifecycle, packaging, hidden startup, controlled VPN recovery, configuration safety, and idle CPU behavior. Run it only when temporarily disconnecting the current VPN is acceptable.
 
+Foreground repair of the third-party EasyConnect native window is intentionally separate from this MVP verifier. Use `npm run smoke:packaged-official-ui-repair` only as an opt-in diagnostic on an unlocked desktop.
+
 ## Configuration Notes
 
 Workbench stores its local config under the app's user data directory, for example:

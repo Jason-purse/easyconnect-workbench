@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { delimiter, dirname, extname, join, resolve, sep } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
 const SESSION_NAME = "easyconnect-vpn-only-keyboard-qa";
 const NODE_BIN_DIR = dirname(process.execPath);
+const SCREENSHOT_DIR = join(ROOT_DIR, "output", "playwright");
 
 async function isExecutable(filePath) {
   if (!filePath) {
@@ -128,10 +129,32 @@ async (page) => {
   };
   await page.waitForFunction(() => document.querySelector("#connection-title")?.textContent === "连接受到保护");
 
-  for (const viewport of [{ width: 1040, height: 720 }, { width: 900, height: 640 }]) {
+  for (const viewport of [
+    { width: 1536, height: 1152, expectContentScroll: false },
+    {
+      width: 1152,
+      height: 864,
+      expectContentScroll: false,
+      screenshotPath: ${JSON.stringify(join(SCREENSHOT_DIR, "vpn-only-1152x864.png"))},
+    },
+    { width: 900, height: 720, expectContentScroll: false },
+    {
+      width: 900,
+      height: 640,
+      expectContentScroll: true,
+      screenshotPath: ${JSON.stringify(join(SCREENSHOT_DIR, "vpn-only-900x640.png"))},
+    },
+    {
+      width: 720,
+      height: 760,
+      expectContentScroll: true,
+      screenshotPath: ${JSON.stringify(join(SCREENSHOT_DIR, "vpn-only-720x760.png"))},
+    },
+  ]) {
     await page.setViewportSize(viewport);
     const layout = await page.evaluate(() => {
       const section = document.querySelector('[aria-labelledby="maintainer-heading"]');
+      const content = document.querySelector(".app-content");
       const heading = section.querySelector(".section-heading > div").getBoundingClientRect();
       const action = document.querySelector("#maintainer-action").getBoundingClientRect();
       const sectionRect = section.getBoundingClientRect();
@@ -147,13 +170,38 @@ async (page) => {
       );
       return {
         noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+        documentFitsViewport:
+          document.documentElement.scrollHeight <= window.innerHeight && document.body.scrollHeight <= window.innerHeight,
+        contentScrolls: content.scrollHeight > content.clientHeight + 1,
+        contentScrollHeight: content.scrollHeight,
+        contentClientHeight: content.clientHeight,
+        contentOverflowY: getComputedStyle(content).overflowY,
+        regionHeights: Object.fromEntries(
+          [".connection-band", ".summary-strip", ".overview-grid", ".activity-preview"].map((selector) => [
+            selector,
+            Math.round(document.querySelector(selector).getBoundingClientRect().height),
+          ]),
+        ),
         valuesFit,
         actionOverlapsHeading,
       };
     });
     assert(layout.noHorizontalOverflow, viewport.width + "px viewport must not overflow horizontally");
+    assert(layout.documentFitsViewport, viewport.width + "px page shell must stay inside the viewport");
+    assert(layout.contentOverflowY === "auto", viewport.width + "px main content must own vertical overflow");
+    if (viewport.expectContentScroll !== undefined) {
+      assert(
+        layout.contentScrolls === viewport.expectContentScroll,
+        viewport.width + "x" + viewport.height + " content scroll expectation must match (" +
+          layout.contentScrollHeight + "px content / " + layout.contentClientHeight + "px viewport; " +
+          JSON.stringify(layout.regionHeights) + ")",
+      );
+    }
     assert(layout.valuesFit, viewport.width + "px maintainer values must stay inside their section");
     assert(!layout.actionOverlapsHeading, viewport.width + "px maintainer heading and action must not overlap");
+    if (viewport.screenshotPath) {
+      await page.screenshot({ path: viewport.screenshotPath });
+    }
   }
 
   const openButton = page.locator("#open-settings");
@@ -336,13 +384,14 @@ function closeServer(server) {
 const server = createRendererServer();
 
 try {
+  await mkdir(SCREENSHOT_DIR, { recursive: true });
   await listen(server);
   const address = server.address();
   const url = `http://127.0.0.1:${address.port}/src/renderer/index.html`;
   await runPlaywright(["close"], { allowFailure: true });
   await runPlaywright(["open", url]);
   await runPlaywright(["run-code", BROWSER_ASSERTIONS]);
-  console.log("renderer keyboard QA passed: 9 behaviors");
+  console.log("renderer keyboard and viewport QA passed: 5 viewports");
 } catch (error) {
   console.error(error?.stack ?? String(error));
   process.exitCode = 1;

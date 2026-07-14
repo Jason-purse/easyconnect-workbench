@@ -1,5 +1,6 @@
 const DEFAULT_ONLINE_WAIT_MS = 10000;
 const DEFAULT_ONLINE_POLL_MS = 500;
+const DEFAULT_POST_REPAIR_SETTLE_MS = 5000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -90,8 +91,10 @@ export async function runOfficialUiRepairSmoke({
   config = {},
   remoteDebugPort = null,
   allowServiceTargetMutation = false,
+  requireExercise = false,
   onlineWaitMs = DEFAULT_ONLINE_WAIT_MS,
   onlinePollMs = DEFAULT_ONLINE_POLL_MS,
+  postRepairSettleMs = DEFAULT_POST_REPAIR_SETTLE_MS,
 } = {}) {
   if (!vpnService) {
     throw new Error("runOfficialUiRepairSmoke requires vpnService");
@@ -110,7 +113,7 @@ export async function runOfficialUiRepairSmoke({
   if (!repairPreparationActions.has(preparedTarget.action)) {
     const existingBlockingTarget = summarizeExistingBlockingTarget(status);
     if (!existingBlockingTarget) {
-      return {
+      const skipped = {
         action: "skip-no-test-target",
         reason: preparedTarget.reason ?? "No safe official UI test target could be created",
         preparedTarget,
@@ -118,6 +121,12 @@ export async function runOfficialUiRepairSmoke({
         loginStatus: status.loginStatus,
         serviceState: status.serviceState ?? null,
       };
+      if (requireExercise) {
+        const error = new Error("Official UI repair smoke did not exercise official UI repair");
+        error.repair = skipped;
+        throw error;
+      }
+      return skipped;
     }
 
     preparedTarget = {
@@ -130,6 +139,8 @@ export async function runOfficialUiRepairSmoke({
     await vpnService.repairOfficialUi(config, {
       remoteDebugPort: effectiveRemoteDebugPort,
       allowNativeWindowActivation: true,
+      allowLoginFallbackNavigation: false,
+      postRepairSettleMs,
     }),
   );
 

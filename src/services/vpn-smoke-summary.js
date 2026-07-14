@@ -108,15 +108,8 @@ export function assertMaintainerOnline(status, label) {
   }
 
   const repairAction = online?.officialUiRepair?.action;
-  if (![
-    "already-consistent",
-    "repair-official-ui",
-    "restore-unreachable-official-ui",
-    "restore-hidden-service-target",
-    "restore-missing-service-target",
-    "repair-error",
-  ].includes(repairAction)) {
-    const error = new Error(`${label} maintainer cycle did not exercise official UI repair`);
+  if (!repairAction) {
+    const error = new Error(`${label} maintainer cycle did not report an official UI repair outcome`);
     error.status = status;
     throw error;
   }
@@ -138,12 +131,6 @@ export function assertMaintainerRecoveredFromOffline(status, label) {
   const serviceState = online?.serviceState ?? {};
   if (serviceState.base !== "18" || serviceState.l3vpn !== "18" || serviceState.tcp !== "43") {
     const error = new Error(`${label} maintainer cycle did not report healthy VPN services`);
-    error.status = status;
-    throw error;
-  }
-
-  if (online?.officialUiRepair?.action === "repair-error") {
-    const error = new Error(`${label} maintainer cycle left official UI repair in error state`);
     error.status = status;
     throw error;
   }

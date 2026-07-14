@@ -749,7 +749,7 @@ git commit -m "feat: rebuild vpn status center"
 **Interfaces:**
 
 - Consumes: Task 3 semantic ids and view state.
-- Produces: packaged Lucide UMD asset, stable `1040x720`/`900x640` window, and responsive screenshot artifacts.
+- Produces: packaged Lucide UMD asset, display-relative initial window bounds with a `900x640` design floor, and responsive screenshot artifacts.
 
 - [ ] **Step 1: Extend the style contract before implementation**
 
@@ -835,9 +835,10 @@ Use these root tokens in `src/renderer/tailwind.css`:
 Implement these stable layout rules:
 
 ```css
-.app-shell { min-height: 100vh; background: var(--color-bg); color: var(--color-ink); }
+.app-shell { display: grid; grid-template-rows: auto auto minmax(0, 1fr); width: 100%; height: 100dvh; min-height: 0; overflow: hidden; background: var(--color-bg); color: var(--color-ink); }
 .app-toolbar { position: sticky; top: 0; z-index: 20; display: grid; grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr); align-items: center; height: 58px; padding: 0 22px; border-bottom: 1px solid var(--color-line); background: rgba(255, 255, 255, 0.96); }
-.app-content { width: min(100%, 1040px); margin: 0 auto; padding: 24px; }
+.app-content { width: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px; }
+.app-view { width: min(100%, max(992px, 72vw)); margin: 0 auto; }
 .connection-band { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 24px; padding: 26px 0 24px; border-bottom: 1px solid var(--color-line-strong); }
 .connection-band h1 { margin: 8px 0 6px; font-family: "Avenir Next", -apple-system, sans-serif; font-size: 32px; line-height: 1.15; letter-spacing: 0; }
 .summary-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--color-line); }
@@ -845,7 +846,7 @@ Implement these stable layout rules:
 .overview-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr); gap: 0; border-bottom: 1px solid var(--color-line); }
 .section-block { min-width: 0; padding: 24px 0; }
 .section-block + .section-block { padding-left: 24px; border-left: 1px solid var(--color-line); }
-.settings-drawer { position: fixed; z-index: 40; top: 0; right: 0; width: min(420px, calc(100vw - 32px)); height: 100vh; transform: translateX(100%); border-left: 1px solid var(--color-line); background: var(--color-surface); box-shadow: var(--shadow-drawer); transition: transform 180ms ease; }
+.settings-drawer { position: fixed; z-index: 40; top: 0; right: 0; width: min(420px, calc(100vw - 32px)); height: 100dvh; transform: translateX(100%); border-left: 1px solid var(--color-line); background: var(--color-surface); box-shadow: var(--shadow-drawer); transition: transform 180ms ease; }
 .settings-drawer.is-open { transform: translateX(0); }
 @media (max-width: 760px) { .app-toolbar { grid-template-columns: 1fr auto; } .view-switch { grid-column: 1 / -1; order: 3; } .overview-grid, .summary-strip { grid-template-columns: 1fr; } .section-block + .section-block { padding-left: 0; border-left: 0; border-top: 1px solid var(--color-line); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
@@ -855,13 +856,10 @@ All buttons, inputs, rows, notices, activity items, console blocks, tabs, drawer
 
 - [ ] **Step 5: Update BrowserWindow geometry**
 
-After running `gitnexus_impact` for `createWindow`, change the `BrowserWindow` options in `src/main.js` to:
+After running `gitnexus_impact` for `createWindow`, calculate bounds from the display nearest the cursor. `window-geometry.js` applies `60%` work-area width, `80%` work-area height, a `900x640` design floor, work-area caps, centering, and a `1.2-1.6` aspect-ratio range before passing the result to `BrowserWindow`:
 
 ```js
-width: 1040,
-height: 720,
-minWidth: 900,
-minHeight: 640,
+...calculateInitialWindowBounds(display.workArea),
 title: "EasyConnect Workbench",
 backgroundColor: "#eef1ef",
 ```
@@ -965,8 +963,10 @@ async (page) => {
 Capture:
 
 ```text
-output/playwright/vpn-only-1040x720.png
+output/playwright/vpn-only-1152x864.png
+output/playwright/vpn-only-900x720.png
 output/playwright/vpn-only-900x640.png
+output/playwright/vpn-only-720x760.png
 output/playwright/vpn-only-settings.png
 output/playwright/vpn-only-activity.png
 ```
@@ -977,6 +977,7 @@ For each viewport, verify:
 - no horizontal scrollbar;
 - no overlap or clipped labels;
 - status band, overview grid, drawer, and activity view preserve stable dimensions;
+- `1536x1152`、`1152x864`、`900x720` 的常规概览无需滚动，`900x640` 与 `720x760` 只允许主内容区按需滚动；
 - browser console has no unexpected errors;
 - overview/activity/settings/password/diagnostic interactions work.
 
@@ -1140,9 +1141,11 @@ Expected evidence:
 - a new online session is established;
 - service state returns healthy values;
 - invalid-gateway failure smoke does not pollute saved config;
-- official UI repair stays consistent;
+- the background online cycle records a structured official UI outcome for status feedback without gating VPN health;
 - hidden Workbench returns to idle CPU;
 - final config hash/allowed gateway semantics remain valid.
+
+Renderer usability is accepted separately by the headless browser QA, while Electron-only behavior is covered by source and packaged lifecycle/hidden-start smokes. Strict foreground repair of the third-party EasyConnect native window remains an opt-in manual diagnostic and is not part of `verify:mvp-installed`.
 
 If this command fails, stop repeated destructive attempts. Restore connectivity using the last verified allowed gateway and record the exact failing command, phase, and log handle.
 

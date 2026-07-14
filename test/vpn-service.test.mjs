@@ -280,8 +280,9 @@ test("VpnService.getSnapshot includes official UI target state without raw page 
   assert.equal(JSON.stringify(snapshot.status.officialUi).includes("账号 demo-user"), false);
 });
 
-test("VpnService.repairOfficialUi does not mutate a visible gateway probe page while VPN is online", async () => {
+test("VpnService.repairOfficialUi reports incomplete when hidden service restore remains blocked", async () => {
   const calls = [];
+  const delays = [];
   const fakeRuntime = {
     async describeActiveSession() {
       calls.push("describeActiveSession");
@@ -400,6 +401,9 @@ test("VpnService.repairOfficialUi does not mutate a visible gateway probe page w
       throw new Error("repairOfficialUi should not create gateway login");
     },
     existsFn: async () => true,
+    delayFn: async (ms) => {
+      delays.push(ms);
+    },
   });
 
   const config = {
@@ -409,18 +413,16 @@ test("VpnService.repairOfficialUi does not mutate a visible gateway probe page w
       gateways: [{ host: "198.51.100.20", port: 9898 }],
     },
   };
-  const result = await service.repairOfficialUi(config);
+  const result = await service.repairOfficialUi(config, {
+    allowLoginFallbackNavigation: false,
+    postRepairSettleMs: 10,
+  });
 
-  assert.equal(result.action, "restore-hidden-service-target");
-  assert.deepEqual(calls.filter((call) => Array.isArray(call)).map((call) => call[0]), [
-    "navigateRemoteDebugTarget",
-    "waitForRemoteDebugTarget",
-    "syncPortalGlobalState",
-    "bootstrapViaPageBridge",
-    "reloadPortalTarget",
-    "waitForRemoteDebugTarget",
-    "waitForRemoteDebugTarget",
-  ]);
+  assert.equal(result.action, "restore-hidden-service-target-incomplete");
+  assert.deepEqual(delays, [10]);
+  assert.equal(result.status.officialUi.hasBlockingVisibleTarget, true);
+  assert.equal(result.status.officialUi.hasVisibleServiceTarget, false);
+  assert.equal(result.safeFallback?.action, "skip-official-ui-login-fallback-disabled");
   assert.deepEqual(result.restoredFrom, {
     id: "connect-target",
     kind: "probe-failed",
@@ -2717,6 +2719,338 @@ test("VpnService.repairOfficialUi does not close a service target when it is the
   ]);
 });
 
+test("VpnService.repairOfficialUi closes an online stale connect target in background when service exists", async () => {
+  const calls = [];
+  const closedTargets = new Set();
+  let closeShouldFail = false;
+  let nativeWindowCountOverride = null;
+  const targets = [
+    {
+      id: "service-target",
+      type: "page",
+      title: "EasyConnect",
+      url: "https://198.51.100.20:9898/portal/#!/service",
+      webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/service-target",
+    },
+    {
+      id: "connect-target",
+      type: "page",
+      title: "EasyConnect",
+      url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+      webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/connect-target",
+    },
+  ];
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return {
+        token: "secret-token",
+        sessionId: "session-1",
+      };
+    },
+    async getLoginStatus() {
+      return { status: "1" };
+    },
+    async getServiceState() {
+      return { base: "18", l3vpn: "18", tcp: "43" };
+    },
+    async getLocalRuntimeInfo() {
+      return { enableAutoLogin: 0 };
+    },
+    async getRemoteDebugTargets() {
+      return targets.filter((target) => !closedTargets.has(target.id));
+    },
+    async evaluateOnRemoteDebugPageTarget(target) {
+      return {
+        evaluation: {
+          result: {
+            value: {
+              href: target.url,
+              title: target.title,
+              visibilityState: "visible",
+              hidden: false,
+              bodyText: target.id === "service-target" ? "资源搜索 默认资源组" : "",
+            },
+          },
+        },
+      };
+    },
+    async getBundleSettingPath() {
+      return "/Applications/EasyConnect.app/Contents/Resources/conf/setting_demo.json";
+    },
+    async getPort() {
+      return 54530;
+    },
+    async describeLatestCachedToken() {
+      return {};
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    async waitForRemoteDebugTarget(targetUrlPart, options) {
+      calls.push(["waitForRemoteDebugTarget", targetUrlPart, options.remoteDebugPort]);
+      return targets[0];
+    },
+    async syncPortalGlobalState(targetUrlPart, context, options) {
+      calls.push(["syncPortalGlobalState", targetUrlPart, context.sessionId, options.profile]);
+      return { ok: true };
+    },
+    async bootstrapViaPageBridge(targetUrlPart, context, options) {
+      calls.push(["bootstrapViaPageBridge", targetUrlPart, context.sessionId, options.remoteDebugPort]);
+      return { ok: true, token: "derived-token" };
+    },
+    async reloadPortalTarget(targetUrlPart, options) {
+      calls.push(["reloadPortalTarget", targetUrlPart, options.remoteDebugPort]);
+      return { ok: true, href: targets[0].url };
+    },
+    async closeOfficialWindowTarget(targetId, options) {
+      calls.push(["closeOfficialWindowTarget", targetId, options.remoteDebugPort, options.allowNativeWindowActivation]);
+      if (closeShouldFail) {
+        return { ok: false, error: "official close failed" };
+      }
+      closedTargets.add(targetId);
+      return { ok: true, closedBy: "official-window-api" };
+    },
+    async showOfficialWindowTarget(targetId, options) {
+      calls.push(["showOfficialWindowTarget", targetId, options.remoteDebugPort, options.allowNativeWindowActivation]);
+      return { ok: false, error: "should not activate native windows" };
+    },
+    async navigateRemoteDebugTarget(targetId, targetUrl) {
+      calls.push(["navigateRemoteDebugTarget", targetId, targetUrl]);
+      return { ok: true };
+    },
+    async getOfficialNativeWindowState() {
+      const repaired = closedTargets.has("connect-target");
+      const windowCount = nativeWindowCountOverride ?? (repaired ? 1 : 0);
+      return {
+        ok: true,
+        visible: true,
+        windowCount,
+        windowNames: windowCount > 0 ? ["EasyConnect"] : [],
+      };
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+  });
+
+  const result = await service.repairOfficialUi(
+    {
+      vpn: {
+        username: "demo-user",
+        remoteDebugPort: 9222,
+        gateways: [{ host: "198.51.100.20", port: 9898 }],
+      },
+    },
+    {
+      allowNativeWindowActivation: false,
+      onlineAction: "relogin-page-bridge",
+    },
+  );
+
+  assert.equal(result.action, "repair-official-ui");
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "closeOfficialWindowTarget"), [
+    ["closeOfficialWindowTarget", "connect-target", 9222, false],
+  ]);
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "showOfficialWindowTarget"), []);
+  assert.deepEqual(result.closedResidualTargets.map((target) => [target.id, target.kind]), [
+    ["connect-target", "stale-connect"],
+  ]);
+  assert.equal(result.status.officialUi.nativeWindowState.windowCount, 1);
+  assert.equal(result.status.officialUi.needsNativeWindowRestore, false);
+
+  calls.length = 0;
+  closedTargets.clear();
+  closeShouldFail = true;
+  nativeWindowCountOverride = 1;
+  const failed = await service.repairOfficialUi(
+    {
+      vpn: {
+        username: "demo-user",
+        remoteDebugPort: 9222,
+        gateways: [{ host: "198.51.100.20", port: 9898 }],
+      },
+    },
+    {
+      allowNativeWindowActivation: true,
+      allowLoginFallbackNavigation: false,
+      onlineAction: "relogin-page-bridge",
+    },
+  );
+
+  assert.equal(failed.action, "repair-official-ui-incomplete");
+  assert.match(failed.reason, /close|residual/i);
+  assert.deepEqual(
+    failed.closedResidualTargets.map((target) => [target.id, target.kind, target.result.ok]),
+    [["connect-target", "stale-connect", false]],
+  );
+  assert.equal(
+    failed.status.officialUi.targets.some((target) => target.id === "connect-target" && target.visible),
+    true,
+  );
+  assert.equal(failed.safeFallback?.action, "skip-official-ui-login-fallback-disabled");
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget"), []);
+
+  calls.length = 0;
+  closedTargets.clear();
+  closeShouldFail = false;
+  nativeWindowCountOverride = 0;
+  const deferred = await service.repairOfficialUi(
+    {
+      vpn: {
+        username: "demo-user",
+        remoteDebugPort: 9222,
+        gateways: [{ host: "198.51.100.20", port: 9898 }],
+      },
+    },
+    {
+      allowNativeWindowActivation: false,
+      onlineAction: "relogin-page-bridge",
+    },
+  );
+
+  assert.equal(deferred.action, "skip-native-window-activation-background");
+  assert.deepEqual(deferred.closedResidualTargets.map((target) => [target.id, target.kind]), [
+    ["connect-target", "stale-connect"],
+  ]);
+  assert.equal(deferred.status.officialUi.needsNativeWindowRestore, true);
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "showOfficialWindowTarget"), []);
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget"), []);
+});
+
+test("VpnService.repairOfficialUi waits for delayed stale-target and native-window convergence", async () => {
+  const calls = [];
+  const delays = [];
+  let settled = false;
+  const serviceTarget = {
+    id: "service-target",
+    type: "page",
+    title: "EasyConnect",
+    url: "https://198.51.100.20:9898/portal/#!/service",
+    webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/service-target",
+  };
+  const connectTargets = ["connect-a", "connect-b"].map((id) => ({
+    id,
+    type: "page",
+    title: "EasyConnect",
+    url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+    webSocketDebuggerUrl: `ws://127.0.0.1/devtools/page/${id}`,
+  }));
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return { token: "secret-token", sessionId: "session-1" };
+    },
+    async getLoginStatus() {
+      return { status: "1" };
+    },
+    async getServiceState() {
+      return { base: "18", l3vpn: "18", tcp: "43" };
+    },
+    async getLocalRuntimeInfo() {
+      return { enableAutoLogin: 0 };
+    },
+    async getRemoteDebugTargets() {
+      return settled ? [serviceTarget] : [serviceTarget, ...connectTargets];
+    },
+    async evaluateOnRemoteDebugPageTarget(target) {
+      return {
+        evaluation: {
+          result: {
+            value: {
+              href: target.url,
+              title: target.title,
+              visibilityState: "visible",
+              hidden: false,
+              bodyText: target.id === serviceTarget.id ? "资源搜索 默认资源组" : "",
+            },
+          },
+        },
+      };
+    },
+    async getBundleSettingPath() {
+      return "/Applications/EasyConnect.app/Contents/Resources/conf/setting_demo.json";
+    },
+    async getPort() {
+      return 54530;
+    },
+    async describeLatestCachedToken() {
+      return {};
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    async waitForRemoteDebugTarget() {
+      return serviceTarget;
+    },
+    async syncPortalGlobalState() {
+      return { ok: true };
+    },
+    async bootstrapViaPageBridge() {
+      return { ok: true, token: "derived-token" };
+    },
+    async reloadPortalTarget() {
+      return { ok: true, href: serviceTarget.url };
+    },
+    async closeOfficialWindowTarget(targetId) {
+      calls.push(["closeOfficialWindowTarget", targetId]);
+      return {
+        ok: true,
+        value: { ok: true, method: "SF.windowMgr.close", containerId: "0" },
+      };
+    },
+    async showOfficialWindowTarget(targetId) {
+      calls.push(["showOfficialWindowTarget", targetId]);
+      return { ok: true, method: "SF.windowMgr.show", id: "0" };
+    },
+    async getOfficialNativeWindowState() {
+      return {
+        ok: true,
+        visible: true,
+        windowCount: settled ? 1 : 0,
+        windowNames: settled ? ["EasyConnect"] : [],
+      };
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+    delayFn: async (ms) => {
+      delays.push(ms);
+      settled = true;
+    },
+  });
+
+  const result = await service.repairOfficialUi(
+    {
+      vpn: {
+        username: "demo-user",
+        remoteDebugPort: 9222,
+        gateways: [{ host: "198.51.100.20", port: 9898 }],
+      },
+    },
+    {
+      allowNativeWindowActivation: true,
+      allowLoginFallbackNavigation: false,
+      postRepairSettleMs: 5000,
+    },
+  );
+
+  assert.equal(result.action, "repair-official-ui");
+  assert.deepEqual(delays, [5000]);
+  assert.deepEqual(calls.filter((call) => call[0] === "closeOfficialWindowTarget"), [
+    ["closeOfficialWindowTarget", "connect-a"],
+  ]);
+  assert.deepEqual(calls.filter((call) => call[0] === "showOfficialWindowTarget"), [
+    ["showOfficialWindowTarget", "service-target"],
+  ]);
+  assert.equal(result.status.officialUi.hasServiceTarget, true);
+  assert.equal(result.status.officialUi.needsNativeWindowRestore, false);
+  assert.equal(result.status.officialUi.targets.some((target) => target.kind === "connect"), false);
+});
+
 test("VpnService.repairOfficialUi skips background native window activation for an existing service target", async () => {
   const calls = [];
   const fakeRuntime = {
@@ -2821,8 +3155,12 @@ test("VpnService.repairOfficialUi skips background native window activation for 
   assert.equal(result.status.officialUi.needsNativeWindowRestore, true);
 });
 
-test("VpnService.repairOfficialUi restores a missing native window when native activation is allowed", async () => {
+test("VpnService.repairOfficialUi validates missing native window convergence after show", async () => {
   const calls = [];
+  const delays = [];
+  let showRequested = false;
+  let settled = false;
+  let shouldConverge = true;
   const fakeRuntime = {
     async describeActiveSession() {
       return {
@@ -2893,12 +3231,23 @@ test("VpnService.repairOfficialUi restores a missing native window when native a
       calls.push(["reloadPortalTarget", targetUrlPart, options.remoteDebugPort]);
       return { ok: true, href: "https://198.51.100.20:9898/portal/#!/vpn_openresource" };
     },
+    async navigateRemoteDebugTarget(targetUrlPart, targetUrl, options) {
+      calls.push(["navigateRemoteDebugTarget", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      return { ok: true, requestedUrl: targetUrl };
+    },
     async showOfficialWindowTarget(targetUrlPart, options) {
       calls.push(["showOfficialWindowTarget", targetUrlPart, options.remoteDebugPort]);
+      showRequested = true;
       return { ok: true, method: "SF.windowMgr.show", id: "0" };
     },
     async getOfficialNativeWindowState() {
-      return { ok: true, visible: true, windowCount: 0, windowNames: [] };
+      const restored = showRequested && settled && shouldConverge;
+      return {
+        ok: true,
+        visible: true,
+        windowCount: restored ? 1 : 0,
+        windowNames: restored ? ["EasyConnect"] : [],
+      };
     },
     appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
   };
@@ -2906,24 +3255,44 @@ test("VpnService.repairOfficialUi restores a missing native window when native a
   const service = new VpnService({
     runtimeFactory: () => fakeRuntime,
     existsFn: async () => true,
+    delayFn: async (ms) => {
+      delays.push(ms);
+      settled = true;
+    },
   });
 
-  const result = await service.repairOfficialUi(
-    {
-      vpn: {
-        username: "demo-user",
-        remoteDebugPort: 9222,
-        gateways: [{ host: "198.51.100.20", port: 9898 }],
-      },
+  const config = {
+    vpn: {
+      username: "demo-user",
+      remoteDebugPort: 9222,
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
     },
-    { allowNativeWindowActivation: true },
-  );
+  };
+  const result = await service.repairOfficialUi(config);
 
   assert.equal(result.action, "repair-official-ui");
+  assert.deepEqual(delays, [5000]);
   assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "showOfficialWindowTarget"), [
     ["showOfficialWindowTarget", "service-target", 9222],
   ]);
   assert.deepEqual(result.shownOfficialWindow, { ok: true, method: "SF.windowMgr.show", id: "0" });
+  assert.equal(result.status.officialUi.needsNativeWindowRestore, false);
+
+  calls.length = 0;
+  delays.length = 0;
+  showRequested = false;
+  settled = false;
+  shouldConverge = false;
+  const failed = await service.repairOfficialUi(config);
+
+  assert.equal(failed.action, "repair-official-ui-incomplete");
+  assert.deepEqual(delays, [5000]);
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "showOfficialWindowTarget"), [
+    ["showOfficialWindowTarget", "service-target", 9222],
+  ]);
+  assert.equal(failed.status.officialUi.needsNativeWindowRestore, true);
+  assert.equal(failed.safeFallback?.action, "skip-official-ui-login-fallback-disabled");
+  assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === "navigateRemoteDebugTarget"), []);
 });
 
 test("VpnService.repairOfficialUi dismisses ecResize native alerts before reporting service UI consistency", async () => {
@@ -4070,6 +4439,14 @@ test("VpnService.repairOfficialUi treats status windows as consistent when the t
 
 test("VpnService.repairOfficialUi can reuse a verified online status when the fresh snapshot lags", async () => {
   const calls = [];
+  let targetRestored = false;
+  const serviceTarget = {
+    id: "service-target",
+    type: "page",
+    title: "EasyConnect",
+    url: "https://198.51.100.20:9898/portal/#!/service",
+    webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/service-target",
+  };
   const fakeRuntime = {
     async describeActiveSession() {
       return null;
@@ -4084,6 +4461,10 @@ test("VpnService.repairOfficialUi can reuse a verified online status when the fr
       return null;
     },
     async getRemoteDebugTargets() {
+      if (targetRestored) {
+        return [serviceTarget];
+      }
+
       return [
         {
           id: "connect-target",
@@ -4092,13 +4473,7 @@ test("VpnService.repairOfficialUi can reuse a verified online status when the fr
           url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
           webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/connect-target",
         },
-        {
-          id: "service-target",
-          type: "page",
-          title: "EasyConnect",
-          url: "https://198.51.100.20:9898/portal/#!/service",
-          webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/service-target",
-        },
+        serviceTarget,
       ];
     },
     async evaluateOnRemoteDebugPageTarget(target) {
@@ -4121,12 +4496,12 @@ test("VpnService.repairOfficialUi can reuse a verified online status when the fr
       return {
         evaluation: {
           result: {
-            value: {
-              href: "https://198.51.100.20:9898/portal/#!/service",
-              title: "EasyConnect",
-              visibilityState: "hidden",
-              hidden: true,
-              bodyText: "资源搜索 默认资源组",
+              value: {
+                href: "https://198.51.100.20:9898/portal/#!/service",
+                title: "EasyConnect",
+                visibilityState: targetRestored ? "visible" : "hidden",
+                hidden: !targetRestored,
+                bodyText: "资源搜索 默认资源组",
             },
           },
         },
@@ -4166,6 +4541,7 @@ test("VpnService.repairOfficialUi can reuse a verified online status when the fr
     },
     async navigateRemoteDebugTarget(targetUrlPart, targetUrl, options) {
       calls.push(["navigateRemoteDebugTarget", targetUrlPart, targetUrl, options.remoteDebugPort]);
+      targetRestored = true;
       return { ok: true, requestedUrl: targetUrl };
     },
     appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
@@ -4218,6 +4594,103 @@ test("VpnService.repairOfficialUi can reuse a verified online status when the fr
     "waitForRemoteDebugTarget",
     "waitForRemoteDebugTarget",
   ]);
+});
+
+test("VpnService.prepareOfficialUiRepairSmokeTarget reuses an existing connect target", async () => {
+  const calls = [];
+  const target = {
+    id: "existing-connect-target",
+    type: "page",
+    title: "EasyConnect",
+    url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+    webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/existing-connect-target",
+  };
+  const fakeRuntime = {
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+    async getRemoteDebugTargets() {
+      calls.push("getRemoteDebugTargets");
+      return [target];
+    },
+    async evaluateOnRemoteDebugPageTarget() {
+      return {
+        evaluation: {
+          result: {
+            value: {
+              href: target.url,
+              title: target.title,
+              visibilityState: "visible",
+              hidden: false,
+              bodyText: "",
+            },
+          },
+        },
+      };
+    },
+    async createRemoteDebugTarget() {
+      calls.push("createRemoteDebugTarget");
+      throw new Error("must not create a second connect target");
+    },
+  };
+  const service = new VpnService({ runtimeFactory: () => fakeRuntime });
+
+  const result = await service.prepareOfficialUiRepairSmokeTarget({
+    vpn: { remoteDebugPort: 9333 },
+  });
+
+  assert.equal(result.action, "prepared-test-target");
+  assert.equal(result.target.id, target.id);
+  assert.equal(result.reusedExistingTarget, true);
+  assert.equal(calls.includes("createRemoteDebugTarget"), false);
+});
+
+test("VpnService.prepareOfficialUiRepairSmokeTarget recognizes a target created despite HTTP 500", async () => {
+  const calls = [];
+  let targetCreated = false;
+  const target = {
+    id: "partially-created-target",
+    type: "page",
+    title: "EasyConnect",
+    url: "file:///Applications/EasyConnect.app/Contents/Resources/Web/local/connect/connect.html",
+    webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/partially-created-target",
+  };
+  const fakeRuntime = {
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+    async getRemoteDebugTargets() {
+      calls.push("getRemoteDebugTargets");
+      return targetCreated ? [target] : [];
+    },
+    async evaluateOnRemoteDebugPageTarget() {
+      return {
+        evaluation: {
+          result: {
+            value: {
+              href: target.url,
+              title: target.title,
+              visibilityState: "visible",
+              hidden: false,
+              bodyText: "",
+            },
+          },
+        },
+      };
+    },
+    async createRemoteDebugTarget(targetUrl, options) {
+      calls.push(["createRemoteDebugTarget", targetUrl, options.remoteDebugPort]);
+      targetCreated = true;
+      throw new Error("HTTP 500: Could not create new page");
+    },
+  };
+  const service = new VpnService({ runtimeFactory: () => fakeRuntime });
+
+  const result = await service.prepareOfficialUiRepairSmokeTarget({
+    vpn: { remoteDebugPort: 9333 },
+  });
+
+  assert.equal(result.action, "prepared-test-target");
+  assert.equal(result.target.id, target.id);
+  assert.match(result.prepareReason, /HTTP 500/);
+  assert.equal(result.reusedExistingTarget, false);
+  assert.equal(calls.filter((call) => call === "getRemoteDebugTargets").length, 2);
 });
 
 test("VpnService.prepareOfficialUiRepairSmokeTarget opens an isolated connect page target", async () => {

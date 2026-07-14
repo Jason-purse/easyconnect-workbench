@@ -54,6 +54,22 @@ test("describeMaintainerEvent reports quiet-hours keepalive pause", () => {
   });
 });
 
+test("describeMaintainerEvent reports a keepalive cycle deferred by a manual action", () => {
+  const summary = describeMaintainerEvent({
+    ok: true,
+    result: {
+      action: "keepalive-deferred-active-action",
+      activeAction: "recover-login",
+      nextIntervalMs: 30000,
+    },
+  });
+
+  assert.equal(summary.title, "自动检查已顺延");
+  assert.match(summary.detail, /手动操作/);
+  assert.match(summary.detail, /30 秒/);
+  assert.equal(summary.variant, "idle");
+});
+
 test("describeMaintainerEvent reports restored official service page", () => {
   const summary = describeMaintainerEvent({
     ok: true,

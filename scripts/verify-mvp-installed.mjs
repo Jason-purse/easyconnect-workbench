@@ -1,4 +1,4 @@
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -9,7 +9,9 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDir, "..");
 const distApp = path.join(projectRoot, "dist.noindex", "EasyConnect Workbench.app");
 const installedApp = "/Applications/EasyConnect Workbench.app";
+const stagedApp = `${installedApp}.installing`;
 const installedExecutable = path.join(installedApp, "Contents", "MacOS", "EasyConnect Workbench");
+const stagedExecutable = path.join(stagedApp, "Contents", "MacOS", "EasyConnect Workbench");
 const installedAppNeedle = `${installedApp}/`;
 const packagedAppNeedle = `${distApp}/`;
 const configPath = path.join(
@@ -256,6 +258,20 @@ async function stopInstalledWorkbench() {
   log("stop-workbench-ok", { mode: "kill" });
 }
 
+async function replaceInstalledWorkbench() {
+  await rm(stagedApp, { recursive: true, force: true });
+  await run("/usr/bin/ditto", [distApp, stagedApp]);
+
+  if (!(await exists(stagedExecutable))) {
+    await rm(stagedApp, { recursive: true, force: true });
+    throw new Error(`Staged executable is missing: ${stagedExecutable}`);
+  }
+
+  await rm(installedApp, { recursive: true, force: true });
+  await rename(stagedApp, installedApp);
+  log("install-replaced", { installedApp });
+}
+
 function parseAllowedGatewayFromText(text, allowedGateways) {
   for (const gateway of allowedGateways) {
     const [host, port] = gateway.split(":");
@@ -452,24 +468,36 @@ async function main() {
 
   await stopInstalledWorkbench();
   await alignLastKnownGatewayWithCurrentState(allowedGateways);
-  await run("/usr/bin/ditto", [distApp, installedApp]);
+  await replaceInstalledWorkbench();
 
   if (!(await exists(installedExecutable))) {
     throw new Error(`Installed executable is missing: ${installedExecutable}`);
   }
 
-  await run(installedExecutable, ["--smoke-vpn-autostart", "--smoke-timeout-ms=120000"]);
+  await run(installedExecutable, [
+    "--smoke-vpn-autostart",
+    "--smoke-ignore-quiet-hours",
+    "--smoke-timeout-ms=120000",
+  ]);
+  await run(installedExecutable, [
+    "--smoke-vpn-keepalive",
+    "--smoke-ignore-quiet-hours",
+    "--smoke-interval-seconds=10",
+    "--smoke-timeout-ms=180000",
+  ]);
   await run(installedExecutable, [
     "--smoke-vpn-offline-recovery",
+    "--smoke-ignore-quiet-hours",
     "--smoke-interval-seconds=10",
     "--smoke-timeout-ms=180000",
   ]);
   await run(installedExecutable, [
     "--smoke-vpn-failure-state",
+    "--smoke-ignore-quiet-hours",
     "--smoke-interval-seconds=10",
+    "--smoke-restore-timeout-ms=300000",
     "--smoke-timeout-ms=180000",
   ]);
-  await run(installedExecutable, ["--smoke-official-ui-repair", "--smoke-timeout-ms=120000"]);
 
   await stopInstalledWorkbench();
   await run("/usr/bin/open", ["-na", installedApp, "--args", "--hidden"]);

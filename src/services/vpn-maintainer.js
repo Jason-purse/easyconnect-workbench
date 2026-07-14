@@ -5,6 +5,7 @@ import { redactMaintainerEvent } from "./maintainer-log.js";
 import { collectRecoveryGateways } from "./vpn-gateway-pool.js";
 
 const LOCAL_SERVICE_FAILURE_BACKOFF_MS = 15 * 60 * 1000;
+const ACTIVE_ACTION_RETRY_MAX_MS = 30 * 1000;
 const OFFICIAL_UI_REPAIR_COOLDOWN_MS = 15 * 60 * 1000;
 const OFFICIAL_UI_POST_REPAIR_SETTLE_MS = 75 * 1000;
 const DEFAULT_QUIET_START = "18:30";
@@ -331,14 +332,22 @@ export class VpnMaintainer {
     this.ensureOnlineFn = options.ensureOnlineFn ?? ensureOnline;
     this.maintainOnlineFn = options.maintainOnlineFn ?? maintainOnline;
     this.repairOfficialUiFn = options.repairOfficialUiFn ?? null;
+    this.actionRunner =
+      options.actionRunner ?? ((_key, operation) => Promise.resolve().then(operation));
     this.nowFn = options.nowFn ?? (() => Date.now());
     this.onGatewaySelected = options.onGatewaySelected ?? (async () => {});
     this.eventLogger = options.eventLogger ?? null;
     this.controller = null;
     this.activeRun = null;
+    this.activeCyclePromise = null;
+    this.startPromise = null;
+    this.stopPromise = null;
+    this.execution = null;
     this.lastOfficialUiRepair = null;
     this.state = {
       running: false,
+      draining: false,
+      drainingSince: null,
       gateway: null,
       intervalSeconds: null,
       cycleTimeoutMs: null,
@@ -470,7 +479,26 @@ export class VpnMaintainer {
     };
   }
 
-  async start(config = {}, options = {}) {
+  start(config = {}, options = {}) {
+    if (this.state.running) {
+      return Promise.resolve(this.getStatus());
+    }
+    if (this.startPromise) {
+      return this.startPromise;
+    }
+
+    const startPromise = this.startRun(config, options);
+    this.startPromise = startPromise;
+    const clear = () => {
+      if (this.startPromise === startPromise) {
+        this.startPromise = null;
+      }
+    };
+    startPromise.then(clear, clear);
+    return startPromise;
+  }
+
+  async startRun(config = {}, options = {}) {
     if (this.state.running) {
       return this.getStatus();
     }
@@ -482,7 +510,9 @@ export class VpnMaintainer {
     }
 
     const runtime = this.runtimeFactory(config);
-    const officialAutoConnectGuard = await this.disableOfficialAutoConnect(runtime, config);
+    const officialAutoConnectGuard = await this.actionRunner("maintainer-initialize", () =>
+      this.disableOfficialAutoConnect(runtime, config),
+    );
     let gateways = collectRecoveryGateways(
       config,
       options.gatewayCandidates ?? [],
@@ -511,80 +541,101 @@ export class VpnMaintainer {
         return buildQuietHoursPausedResult(quietHours);
       }
 
-      let lastError = new Error("VpnMaintainer could not recover any gateway");
-      const gatewayAttempts = [];
+      let cyclePromise = null;
+      try {
+        cyclePromise = this.actionRunner("maintainer-cycle", async () => {
+          let lastError = new Error("VpnMaintainer could not recover any gateway");
+          const gatewayAttempts = [];
 
-      for (const gatewayCandidate of gateways) {
-        try {
-          const result = await this.ensureOnlineFn({
-            ...maintainOptions,
-            runtime,
-            gatewayLogin: this.gatewayLoginFactory(gatewayCandidate),
-            gatewayHost: gatewayCandidate.host,
-            gatewayPort: gatewayCandidate.port,
-            username,
-            password,
-            onPhase: (phase) => {
-              if (this.activeRun !== runId) {
-                return;
-              }
+          for (const gatewayCandidate of gateways) {
+            try {
+              const result = await this.ensureOnlineFn({
+                ...maintainOptions,
+                runtime,
+                gatewayLogin: this.gatewayLoginFactory(gatewayCandidate),
+                gatewayHost: gatewayCandidate.host,
+                gatewayPort: gatewayCandidate.port,
+                username,
+                password,
+                onPhase: (phase) => {
+                  if (this.activeRun !== runId) {
+                    return;
+                  }
 
-              this.state.currentPhase = phase;
-              this.state.phaseUpdatedAt = new Date().toISOString();
-              maintainOptions.onPhase?.(phase);
-              void this.writeEvent("maintainer-phase", {
-                runId,
-                phase,
-                gateway: {
-                  host: gatewayCandidate.host,
-                  port: gatewayCandidate.port,
+                  this.state.currentPhase = phase;
+                  this.state.phaseUpdatedAt = new Date().toISOString();
+                  maintainOptions.onPhase?.(phase);
+                  void this.writeEvent("maintainer-phase", {
+                    runId,
+                    phase,
+                    gateway: {
+                      host: gatewayCandidate.host,
+                      port: gatewayCandidate.port,
+                    },
+                  });
                 },
               });
-            },
-          });
-          const officialUiRepair = await this.repairOfficialUiAfterOnline(config, gatewayCandidate, result);
-          const usedGateway = result.action !== "already-online";
+              const officialUiRepair = await this.repairOfficialUiAfterOnline(config, gatewayCandidate, result);
+              const usedGateway = result.action !== "already-online";
 
-          return {
-            ...(usedGateway ? { gateway: gatewayCandidate } : {}),
-            gatewayAttempts: [
-              ...gatewayAttempts,
-              {
+              return {
+                ...(usedGateway ? { gateway: gatewayCandidate } : {}),
+                gatewayAttempts: [
+                  ...gatewayAttempts,
+                  {
+                    gateway: `${gatewayCandidate.host}:${gatewayCandidate.port}`,
+                    ok: true,
+                  },
+                ],
+                ...result,
+                ...(officialUiRepair ? { officialUiRepair } : {}),
+              };
+            } catch (error) {
+              lastError = error;
+              const attempt = {
                 gateway: `${gatewayCandidate.host}:${gatewayCandidate.port}`,
-                ok: true,
-              },
-            ],
-            ...result,
-            ...(officialUiRepair ? { officialUiRepair } : {}),
+                ok: false,
+                error: error?.message ?? String(error),
+              };
+              if (error?.code) {
+                attempt.code = error.code;
+              }
+              if (error?.diagnostics) {
+                attempt.diagnostics = error.diagnostics;
+              }
+              if (error?.code === "EASYCONNECT_PRIVATE_KICK") {
+                const privateKickCleanup = await this.cleanupOfficialUiAfterPrivateKick(runtime, config);
+                attempt.privateKickCleanup = privateKickCleanup;
+                error.privateKickCleanup = privateKickCleanup;
+              }
+              gatewayAttempts.push(attempt);
+              if (isRecoveryInfrastructureReadinessFailure(error)) {
+                error.gatewayAttempts = gatewayAttempts;
+                throw error;
+              }
+            }
+          }
+
+          lastError.gatewayAttempts = gatewayAttempts;
+          throw lastError;
+        });
+        this.activeCyclePromise = cyclePromise;
+        return await cyclePromise;
+      } catch (error) {
+        if (error?.code === "EASYCONNECT_VPN_ACTION_IN_PROGRESS") {
+          return {
+            action: "keepalive-deferred-active-action",
+            activeAction: error.activeKey ?? null,
+            nextIntervalMs: Math.min(intervalSeconds * 1000, ACTIVE_ACTION_RETRY_MAX_MS),
           };
-        } catch (error) {
-          lastError = error;
-          const attempt = {
-            gateway: `${gatewayCandidate.host}:${gatewayCandidate.port}`,
-            ok: false,
-            error: error?.message ?? String(error),
-          };
-          if (error?.code) {
-            attempt.code = error.code;
-          }
-          if (error?.diagnostics) {
-            attempt.diagnostics = error.diagnostics;
-          }
-          if (error?.code === "EASYCONNECT_PRIVATE_KICK") {
-            const privateKickCleanup = await this.cleanupOfficialUiAfterPrivateKick(runtime, config);
-            attempt.privateKickCleanup = privateKickCleanup;
-            error.privateKickCleanup = privateKickCleanup;
-          }
-          gatewayAttempts.push(attempt);
-          if (isRecoveryInfrastructureReadinessFailure(error)) {
-            error.gatewayAttempts = gatewayAttempts;
-            throw error;
-          }
+        }
+
+        throw error;
+      } finally {
+        if (this.activeCyclePromise === cyclePromise) {
+          this.activeCyclePromise = null;
         }
       }
-
-      lastError.gatewayAttempts = gatewayAttempts;
-      throw lastError;
     };
 
     this.controller = controller;
@@ -592,6 +643,8 @@ export class VpnMaintainer {
     this.lastOfficialUiRepair = null;
     this.state = {
       running: true,
+      draining: false,
+      drainingSince: null,
       gateway: {
         host: gateway.host,
         port: gateway.port,
@@ -656,11 +709,34 @@ export class VpnMaintainer {
               gatewayAttempts: event.error?.gatewayAttempts,
             };
         this.state.lastError = event.ok ? null : this.state.lastEvent.error;
+        const drainingCycle =
+          !event.ok &&
+          event.error?.code === "MAINTAINER_CYCLE_TIMEOUT" &&
+          this.activeCyclePromise;
+        if (drainingCycle) {
+          this.state.draining = true;
+          this.state.drainingSince = new Date().toISOString();
+          this.state.currentPhase = "draining-cycle";
+          this.state.phaseUpdatedAt = this.state.drainingSince;
+        }
         await this.writeEvent("maintainer-cycle", {
           runId,
           cycleCount: this.state.cycleCount,
           ...this.state.lastEvent,
         });
+        if (drainingCycle) {
+          try {
+            await drainingCycle;
+          } catch {
+            // The timeout event already records this cycle's user-facing failure.
+          }
+          if (this.activeRun === runId) {
+            this.state.draining = false;
+            this.state.drainingSince = null;
+            this.state.currentPhase = null;
+            this.state.phaseUpdatedAt = null;
+          }
+        }
         if (!event.ok && isRecoveryInfrastructureReadinessFailure(event.error)) {
           return {
             nextIntervalMs: Math.max(intervalSeconds * 1000, LOCAL_SERVICE_FAILURE_BACKOFF_MS),
@@ -685,15 +761,33 @@ export class VpnMaintainer {
           error: this.state.lastError,
         });
       })
-      .finally(() => {
+      .finally(async () => {
+        const activeCyclePromise = this.activeCyclePromise;
+        if (activeCyclePromise) {
+          this.state.draining = true;
+          this.state.drainingSince ??= new Date().toISOString();
+          try {
+            await activeCyclePromise;
+          } catch {
+            // The cycle result is already represented by the maintainer event.
+          }
+        }
+
         if (this.activeRun !== runId) {
           return;
         }
 
         this.state.running = false;
+        this.state.draining = false;
+        this.state.drainingSince = null;
+        this.state.currentPhase = null;
+        this.state.phaseUpdatedAt = null;
         this.state.stoppedAt = new Date().toISOString();
         this.controller = null;
         this.activeRun = null;
+        if (this.execution === execution) {
+          this.execution = null;
+        }
         void this.writeEvent("maintainer-stopped", {
           runId,
           cycleCount: this.state.cycleCount,
@@ -706,7 +800,32 @@ export class VpnMaintainer {
     return this.getStatus();
   }
 
-  async stop() {
+  stop() {
+    if (this.stopPromise) {
+      return this.stopPromise;
+    }
+
+    const stopPromise = this.stopRun();
+    this.stopPromise = stopPromise;
+    const clear = () => {
+      if (this.stopPromise === stopPromise) {
+        this.stopPromise = null;
+      }
+    };
+    stopPromise.then(clear, clear);
+    return stopPromise;
+  }
+
+  async stopRun() {
+    const startPromise = this.startPromise;
+    if (startPromise) {
+      try {
+        await startPromise;
+      } catch {
+        // A failed start leaves no loop to stop.
+      }
+    }
+
     if (!this.controller) {
       this.state.running = false;
       return this.getStatus();

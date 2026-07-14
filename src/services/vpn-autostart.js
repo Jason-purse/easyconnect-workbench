@@ -1,9 +1,22 @@
 import { getQuietHoursState } from "./vpn-maintainer.js";
 
+const QUIET_HOURS_RESUME_RETRY_MS = 30 * 1000;
+
 export function getMaintainerStatusWithQuietHours({ config = {}, status = {}, nowMs = Date.now() } = {}) {
   return {
     ...status,
     quietHours: getQuietHoursState(config, nowMs),
+  };
+}
+
+export function createVpnSmokeConfig(config = {}, vpnOverrides = {}, { ignoreQuietHours = false } = {}) {
+  return {
+    ...config,
+    vpn: {
+      ...(config.vpn ?? {}),
+      ...vpnOverrides,
+      ...(ignoreQuietHours ? { maintainerQuietHoursEnabled: false } : {}),
+    },
   };
 }
 
@@ -45,6 +58,7 @@ export async function maybeStartMaintainerAutoStart({
   configStore,
   vpnMaintainer,
   gatewayCandidates = [],
+  ignoreQuietHours = false,
   nowFn = () => Date.now(),
   scheduleFn = scheduleQuietHoursResume,
   logger = console,
@@ -67,10 +81,10 @@ export async function maybeStartMaintainerAutoStart({
   }
 
   const quietHours = getQuietHoursState(config, nowFn());
-  if (quietHours.active) {
+  if (quietHours.active && !ignoreQuietHours) {
     const resume = async () => {
       try {
-        await maybeStartMaintainerAutoStart({
+        const result = await maybeStartMaintainerAutoStart({
           configStore,
           vpnMaintainer,
           gatewayCandidates,
@@ -78,8 +92,16 @@ export async function maybeStartMaintainerAutoStart({
           scheduleFn,
           logger,
         });
+        if (
+          result?.code === "EASYCONNECT_VPN_ACTION_IN_PROGRESS" &&
+          typeof scheduleFn === "function"
+        ) {
+          scheduleFn(resume, QUIET_HOURS_RESUME_RETRY_MS);
+        }
+        return result;
       } catch (error) {
         logger?.warn?.("maintainer quiet-hours resume failed", error);
+        return null;
       }
     };
     const scheduledResume = typeof scheduleFn === "function";
@@ -112,8 +134,12 @@ export async function maybeStartMaintainerAutoStart({
     };
   }
 
+  const startConfig = ignoreQuietHours
+    ? createVpnSmokeConfig(config, {}, { ignoreQuietHours: true })
+    : config;
+
   try {
-    const status = await vpnMaintainer.start(config, { gatewayCandidates });
+    const status = await vpnMaintainer.start(startConfig, { gatewayCandidates });
 
     return {
       ok: true,
@@ -126,6 +152,8 @@ export async function maybeStartMaintainerAutoStart({
       ok: false,
       started: false,
       error: error?.message ?? String(error),
+      ...(error?.code ? { code: error.code } : {}),
+      ...(error?.activeKey ? { activeKey: error.activeKey } : {}),
     };
   }
 }

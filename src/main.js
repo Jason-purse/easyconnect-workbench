@@ -1,14 +1,17 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, ipcMain, shell, Menu, nativeImage, Tray } from "electron";
+import { app, BrowserWindow, ipcMain, shell, Menu, nativeImage, screen, Tray } from "electron";
 import { ConfigStore } from "./services/config-store.js";
 import { VpnService } from "./services/vpn-service.js";
 import { VpnMaintainer } from "./services/vpn-maintainer.js";
 import { createVpnActionGuard } from "./services/vpn-action-guard.js";
+import { createBeforeQuitHandler } from "./services/app-shutdown.js";
+import { calculateInitialWindowBounds } from "./services/window-geometry.js";
 import { runOfficialUiRepairSmoke } from "./services/vpn-official-ui-repair-smoke.js";
 import { applyGatewaySelectionHint, applyProbeHints, applySnapshotHints } from "./services/vpn-config-hints.js";
 import { mergeConfigForRender } from "./services/vpn-render-config.js";
 import {
+  createVpnSmokeConfig,
   getMaintainerStatusWithQuietHours,
   maybeStartMaintainerAutoStart,
   startMaintainerWithQuietHoursGuard,
@@ -28,6 +31,11 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TRAY_REFRESH_INTERVAL_MS = 15000;
 const vpnActionGuard = createVpnActionGuard();
+const MAINTAINER_ACTION_COMPATIBILITY = {
+  "maintainer-initialize": ["maintainer-start"],
+  "maintainer-cycle": ["maintainer-start"],
+  "maintainer-stop": ["maintainer-cycle"],
+};
 
 let mainWindow = null;
 let appTray = null;
@@ -38,6 +46,19 @@ let configStore = null;
 let vpnService = null;
 let vpnMaintainer = null;
 let maintainerLogger = null;
+
+const handleBeforeQuit = createBeforeQuitHandler({
+  onPrepare() {
+    isQuitting = true;
+    if (trayRefreshTimer) {
+      clearInterval(trayRefreshTimer);
+      trayRefreshTimer = null;
+    }
+  },
+  stopMaintainer: () => vpnMaintainer?.stop(),
+  drainActions: () => vpnActionGuard.drain(),
+  quit: () => app.quit(),
+});
 
 function configureAppPaths() {
   app.setName("EasyConnect Workbench");
@@ -226,6 +247,7 @@ async function runVpnAutostartSmoke() {
   const autostart = await maybeStartMaintainerAutoStart({
     configStore,
     vpnMaintainer,
+    ignoreQuietHours: hasArg("--smoke-ignore-quiet-hours"),
   });
 
   writeSmokeEvent("autostart", { result: summarizeAutostartResult(autostart) });
@@ -247,14 +269,14 @@ async function runVpnKeepaliveSmoke() {
   const intervalSeconds = getNumberArg("--smoke-interval-seconds", 10);
   const offlineTimeoutMs = getNumberArg("--smoke-offline-timeout-ms", Math.max(4000, intervalSeconds * 1000 - 1500));
   const config = await configStore.load();
-  const smokeConfig = {
-    ...config,
-    vpn: {
-      ...(config.vpn ?? {}),
+  const smokeConfig = createVpnSmokeConfig(
+    config,
+    {
       maintainerAutoStart: true,
       maintainerIntervalSeconds: intervalSeconds,
     },
-  };
+    { ignoreQuietHours: hasArg("--smoke-ignore-quiet-hours") },
+  );
 
   const started = await vpnMaintainer.start(smokeConfig);
   writeSmokeEvent("started", { status: summarizeMaintainerStatus(started) });
@@ -286,14 +308,14 @@ async function runVpnOfflineRecoverySmoke() {
   const intervalSeconds = getNumberArg("--smoke-interval-seconds", 10);
   const offlineTimeoutMs = getNumberArg("--smoke-offline-timeout-ms", 30000);
   const config = await configStore.load();
-  const smokeConfig = {
-    ...config,
-    vpn: {
-      ...(config.vpn ?? {}),
+  const smokeConfig = createVpnSmokeConfig(
+    config,
+    {
       maintainerAutoStart: true,
       maintainerIntervalSeconds: intervalSeconds,
     },
-  };
+    { ignoreQuietHours: hasArg("--smoke-ignore-quiet-hours") },
+  );
 
   const runtime = vpnService.createRuntime(smokeConfig);
   const killed = await runtime.killMainAppProcesses({ force: true });
@@ -319,6 +341,7 @@ async function runVpnOfflineRecoverySmoke() {
 
 async function runVpnFailureStateSmoke() {
   const timeoutMs = getNumberArg("--smoke-timeout-ms", 180000);
+  const restoreTimeoutMs = getNumberArg("--smoke-restore-timeout-ms", timeoutMs);
   const intervalSeconds = getNumberArg("--smoke-interval-seconds", 10);
   const config = await configStore.load();
   const invalidGateways = [
@@ -331,16 +354,16 @@ async function runVpnFailureStateSmoke() {
       port: 1,
     },
   ];
-  const failureConfig = {
-    ...config,
-    vpn: {
-      ...(config.vpn ?? {}),
+  const failureConfig = createVpnSmokeConfig(
+    config,
+    {
       maintainerAutoStart: true,
       maintainerIntervalSeconds: intervalSeconds,
       lastKnownGateway: invalidGateways[0],
       gateways: invalidGateways,
     },
-  };
+    { ignoreQuietHours: hasArg("--smoke-ignore-quiet-hours") },
+  );
 
   const runtime = vpnService.createRuntime(config);
   const killed = await runtime.killMainAppProcesses({ force: true });
@@ -369,18 +392,20 @@ async function runVpnFailureStateSmoke() {
     gateways: afterFailureConfig.vpn?.gateways ?? [],
   });
 
-  const restoredStart = await vpnMaintainer.start({
-    ...config,
-    vpn: {
-      ...(config.vpn ?? {}),
+  const restoreConfig = createVpnSmokeConfig(
+    config,
+    {
       maintainerAutoStart: true,
       maintainerIntervalSeconds: intervalSeconds,
+      maintainerCycleTimeoutMs: restoreTimeoutMs,
     },
-  });
+    { ignoreQuietHours: hasArg("--smoke-ignore-quiet-hours") },
+  );
+  const restoredStart = await vpnMaintainer.start(restoreConfig);
   writeSmokeEvent("restore-started", { status: summarizeMaintainerStatus(restoredStart) });
 
   const restored = assertMaintainerOnline(
-    await waitForMaintainerCycle(1, timeoutMs),
+    await waitForMaintainerCycle(1, restoreTimeoutMs),
     "VPN failure-state restore",
   );
   writeSmokeEvent("restored", { status: summarizeMaintainerStatus(restored) });
@@ -407,6 +432,7 @@ async function runVpnOfficialUiRepairSmoke() {
     vpnService,
     config,
     allowServiceTargetMutation: hasArg("--smoke-allow-ui-mutation"),
+    requireExercise: hasArg("--smoke-require-ui-repair"),
     onlineWaitMs: getNumberArg("--smoke-online-wait-ms", 15000),
   });
 
@@ -519,12 +545,19 @@ function runTrayAction(action) {
     });
 }
 
-function runVpnAction(key, operation) {
-  return vpnActionGuard.run(key, operation);
+function runVpnAction(key, operation, options = {}) {
+  return vpnActionGuard.run(key, operation, options);
+}
+
+function runMaintainerAction(key, operation) {
+  return runVpnAction(key, operation, {
+    scope: "maintainer",
+    allowWith: MAINTAINER_ACTION_COMPATIBILITY[key] ?? [],
+  });
 }
 
 async function startMaintainerFromTray() {
-  return runVpnAction("maintainer-start", async () => {
+  return runMaintainerAction("maintainer-start", async () => {
     const config = await configStore.load();
     return startMaintainerWithQuietHoursGuard({
       config,
@@ -534,7 +567,7 @@ async function startMaintainerFromTray() {
 }
 
 function stopMaintainerFromTray() {
-  return runVpnAction("maintainer-stop", () => vpnMaintainer.stop());
+  return runMaintainerAction("maintainer-stop", () => vpnMaintainer.stop());
 }
 
 function updateTrayMenu() {
@@ -660,11 +693,11 @@ function createWindow() {
     return mainWindow;
   }
 
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const windowBounds = calculateInitialWindowBounds(display.workArea);
+
   mainWindow = new BrowserWindow({
-    width: 1040,
-    height: 720,
-    minWidth: 900,
-    minHeight: 640,
+    ...windowBounds,
     title: "EasyConnect Workbench",
     backgroundColor: "#eef1ef",
     webPreferences: {
@@ -883,7 +916,7 @@ function registerIpc() {
     });
   });
   ipcMain.handle("vpn:maintainer-start", async (_event, payload = {}) =>
-    runVpnAction("maintainer-start", async () => {
+    runMaintainerAction("maintainer-start", async () => {
       const config = await configStore.load();
       const status = await startMaintainerWithQuietHoursGuard({
         config,
@@ -896,7 +929,7 @@ function registerIpc() {
     }),
   );
   ipcMain.handle("vpn:maintainer-stop", async () =>
-    runVpnAction("maintainer-stop", async () => {
+    runMaintainerAction("maintainer-stop", async () => {
       const status = await vpnMaintainer.stop();
       updateTrayMenu();
       return status;
@@ -918,6 +951,7 @@ app.whenReady().then(async () => {
   maintainerLogger = createMaintainerLogger(path.join(app.getPath("home"), "Library", "Logs", "easyconnect-workbench"));
   vpnMaintainer = new VpnMaintainer({
     eventLogger: maintainerLogger,
+    actionRunner: runMaintainerAction,
     repairOfficialUiFn: (config, options) => vpnService.repairOfficialUi(config, options),
     onGatewaySelected: async (gateway) => {
       const config = await configStore.load();
@@ -1075,14 +1109,4 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", async () => {
-  isQuitting = true;
-  if (trayRefreshTimer) {
-    clearInterval(trayRefreshTimer);
-    trayRefreshTimer = null;
-  }
-
-  if (vpnMaintainer) {
-    await vpnMaintainer.stop();
-  }
-});
+app.on("before-quit", handleBeforeQuit);

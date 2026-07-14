@@ -47,3 +47,84 @@ test("npm test includes the VPN-only product boundary and excludes platform test
   assert.match(packageJson.scripts.test, /test\/product-boundary\.test\.mjs/);
   assert.doesNotMatch(packageJson.scripts.test, /platform-api-client/);
 });
+
+test("installed verification replaces the app bundle instead of overlaying stale files", async () => {
+  const source = await readFile("scripts/verify-mvp-installed.mjs", "utf8");
+  const stageCopy = source.indexOf('await run("/usr/bin/ditto", [distApp, stagedApp])');
+  const removeInstalled = source.indexOf("await rm(installedApp, { recursive: true, force: true })");
+  const activateStage = source.indexOf("await rename(stagedApp, installedApp)");
+
+  assert.notEqual(stageCopy, -1, "installer must copy the package into a staging bundle");
+  assert.notEqual(removeInstalled, -1, "installer must remove the previous bundle and its stale files");
+  assert.notEqual(activateStage, -1, "installer must activate the staged bundle with rename");
+  assert.ok(stageCopy < removeInstalled && removeInstalled < activateStage);
+  assert.doesNotMatch(source, /run\("\/usr\/bin\/ditto", \[distApp, installedApp\]\)/);
+});
+
+test("VPN smoke verification explicitly bypasses quiet hours without changing production defaults", async () => {
+  const verifierSource = await readFile("scripts/verify-mvp-installed.mjs", "utf8");
+  const mainSource = await readFile("src/main.js", "utf8");
+  const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+
+  for (const scriptName of [
+    "smoke:vpn-autostart",
+    "smoke:vpn-keepalive",
+    "smoke:vpn-offline-recovery",
+    "smoke:vpn-failure-state",
+    "smoke:packaged-vpn-autostart",
+    "smoke:packaged-vpn-offline-recovery",
+    "smoke:packaged-vpn-failure-state",
+  ]) {
+    assert.match(packageJson.scripts[scriptName], /--smoke-ignore-quiet-hours/, scriptName);
+  }
+  for (const smokeFlag of [
+    "--smoke-vpn-autostart",
+    "--smoke-vpn-keepalive",
+    "--smoke-vpn-offline-recovery",
+    "--smoke-vpn-failure-state",
+  ]) {
+    assert.match(
+      verifierSource,
+      new RegExp(`${smokeFlag}[\\s\\S]{0,180}--smoke-ignore-quiet-hours`),
+      smokeFlag,
+    );
+  }
+  assert.match(
+    mainSource,
+    /ignoreQuietHours:\s*hasArg\("--smoke-ignore-quiet-hours"\)/,
+  );
+  assert.match(mainSource, /createVpnSmokeConfig/);
+});
+
+test("installed MVP verification keeps native official UI repair opt-in", async () => {
+  const verifierSource = await readFile("scripts/verify-mvp-installed.mjs", "utf8");
+  const mainSource = await readFile("src/main.js", "utf8");
+  const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+
+  assert.doesNotMatch(verifierSource, /--smoke-official-ui-repair/);
+  assert.match(packageJson.scripts["smoke:official-ui-repair"], /--smoke-official-ui-repair/);
+  assert.match(
+    packageJson.scripts["smoke:packaged-official-ui-repair"],
+    /--smoke-official-ui-repair/,
+  );
+  assert.match(
+    mainSource,
+    /requireExercise:\s*hasArg\("--smoke-require-ui-repair"\)/,
+  );
+});
+
+test("failure-state cleanup restore has an explicit smoke-only timeout budget", async () => {
+  const verifierSource = await readFile("scripts/verify-mvp-installed.mjs", "utf8");
+  const mainSource = await readFile("src/main.js", "utf8");
+
+  assert.match(
+    verifierSource,
+    /--smoke-vpn-failure-state[\s\S]{0,240}--smoke-restore-timeout-ms=300000/,
+  );
+  assert.match(
+    mainSource,
+    /restoreTimeoutMs\s*=\s*getNumberArg\("--smoke-restore-timeout-ms",\s*timeoutMs\)/,
+  );
+  assert.match(mainSource, /maintainerCycleTimeoutMs:\s*restoreTimeoutMs/);
+  assert.match(mainSource, /waitForMaintainerCycle\(1,\s*restoreTimeoutMs\)/);
+});

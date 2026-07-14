@@ -34,6 +34,32 @@ test("getMaintainerStatusWithQuietHours exposes the authoritative current window
   assert.equal(resumed.quietHours.active, false);
 });
 
+test("createVpnSmokeConfig applies VPN overrides and disables quiet hours without mutating config", async () => {
+  const { createVpnSmokeConfig } = await import("../src/services/vpn-autostart.js");
+  assert.equal(typeof createVpnSmokeConfig, "function");
+
+  const config = {
+    app: { launchAtLogin: true },
+    vpn: {
+      maintainerQuietHoursEnabled: true,
+      maintainerIntervalSeconds: 300,
+    },
+  };
+  const smokeConfig = createVpnSmokeConfig(
+    config,
+    { maintainerIntervalSeconds: 10 },
+    { ignoreQuietHours: true },
+  );
+
+  assert.notEqual(smokeConfig, config);
+  assert.notEqual(smokeConfig.vpn, config.vpn);
+  assert.equal(smokeConfig.app, config.app);
+  assert.equal(smokeConfig.vpn.maintainerIntervalSeconds, 10);
+  assert.equal(smokeConfig.vpn.maintainerQuietHoursEnabled, false);
+  assert.equal(config.vpn.maintainerIntervalSeconds, 300);
+  assert.equal(config.vpn.maintainerQuietHoursEnabled, true);
+});
+
 test("startMaintainerWithQuietHoursGuard does not enter VpnMaintainer.start during quiet hours", async () => {
   const calls = [];
   const result = await startMaintainerWithQuietHoursGuard({
@@ -234,6 +260,106 @@ test("maybeStartMaintainerAutoStart pauses automatic keepalive during quiet hour
   assert.deepEqual(calls, ["load", "load", "getStatus", "start"]);
 });
 
+test("quiet-hours resume retries a transient VPN guard conflict without piling timers", async () => {
+  const scheduled = [];
+  let now = new Date(2026, 0, 1, 19, 0, 0, 0).getTime();
+  let startAttempts = 0;
+  const result = await maybeStartMaintainerAutoStart({
+    nowFn: () => now,
+    scheduleFn(callback, delayMs) {
+      scheduled.push({ callback, delayMs });
+      return { unref() {} };
+    },
+    configStore: {
+      async load() {
+        return {
+          vpn: {
+            maintainerAutoStart: true,
+            maintainerQuietHoursEnabled: true,
+            maintainerQuietStart: "18:30",
+            maintainerQuietEnd: "09:00",
+          },
+        };
+      },
+    },
+    vpnMaintainer: {
+      getStatus() {
+        return { running: false };
+      },
+      async start() {
+        startAttempts += 1;
+        if (startAttempts === 1) {
+          const error = new Error("VPN action recover-login is already in progress");
+          error.code = "EASYCONNECT_VPN_ACTION_IN_PROGRESS";
+          error.activeKey = "recover-login";
+          throw error;
+        }
+        return { running: true };
+      },
+    },
+    logger: {
+      warn() {},
+    },
+  });
+
+  assert.equal(result.reason, "quiet-hours");
+  assert.equal(scheduled.length, 1);
+  const initialResume = scheduled.shift();
+  now = new Date(2026, 0, 2, 9, 0, 0, 0).getTime();
+  await initialResume.callback();
+
+  assert.equal(startAttempts, 1);
+  assert.equal(scheduled.length, 1);
+  assert.ok(scheduled[0].delayMs > 0);
+  assert.ok(scheduled[0].delayMs <= 30_000);
+
+  const retry = scheduled.shift();
+  await retry.callback();
+
+  assert.equal(startAttempts, 2);
+  assert.equal(scheduled.length, 0);
+});
+
+test("maybeStartMaintainerAutoStart can explicitly bypass quiet hours for smoke verification", async () => {
+  const calls = [];
+  const config = {
+    vpn: {
+      maintainerAutoStart: true,
+      maintainerQuietHoursEnabled: true,
+      maintainerQuietStart: "18:30",
+      maintainerQuietEnd: "09:00",
+    },
+  };
+  const result = await maybeStartMaintainerAutoStart({
+    ignoreQuietHours: true,
+    nowFn: () => new Date(2026, 0, 1, 19, 0, 0, 0).getTime(),
+    configStore: {
+      async load() {
+        calls.push("load");
+        return config;
+      },
+    },
+    vpnMaintainer: {
+      getStatus() {
+        calls.push("getStatus");
+        return { running: false };
+      },
+      async start(receivedConfig) {
+        calls.push("start");
+        assert.notEqual(receivedConfig, config);
+        assert.equal(receivedConfig.vpn.maintainerQuietHoursEnabled, false);
+        assert.equal(config.vpn.maintainerQuietHoursEnabled, true);
+        return { running: true };
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.started, true);
+  assert.equal(result.status.running, true);
+  assert.deepEqual(calls, ["load", "getStatus", "start"]);
+});
+
 test("maybeStartMaintainerAutoStart reports start failures without throwing", async () => {
   const logs = [];
   const result = await maybeStartMaintainerAutoStart({
@@ -267,4 +393,40 @@ test("maybeStartMaintainerAutoStart reports start failures without throwing", as
     error: "missing password",
   });
   assert.equal(logs.length, 1);
+});
+
+test("maybeStartMaintainerAutoStart preserves transient VPN guard failure metadata", async () => {
+  const result = await maybeStartMaintainerAutoStart({
+    configStore: {
+      async load() {
+        return {
+          vpn: {
+            maintainerAutoStart: true,
+          },
+        };
+      },
+    },
+    vpnMaintainer: {
+      getStatus() {
+        return { running: false };
+      },
+      async start() {
+        const error = new Error("VPN action recover-login is already in progress");
+        error.code = "EASYCONNECT_VPN_ACTION_IN_PROGRESS";
+        error.activeKey = "recover-login";
+        throw error;
+      },
+    },
+    logger: {
+      warn() {},
+    },
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    started: false,
+    error: "VPN action recover-login is already in progress",
+    code: "EASYCONNECT_VPN_ACTION_IN_PROGRESS",
+    activeKey: "recover-login",
+  });
 });

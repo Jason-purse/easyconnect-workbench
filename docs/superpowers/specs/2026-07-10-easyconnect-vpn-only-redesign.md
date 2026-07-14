@@ -89,8 +89,9 @@ EasyConnect Workbench
 
 ### 5.1 窗口
 
-- 默认尺寸：`1040 x 720`；
-- 最小尺寸：`900 x 640`；
+- 初始尺寸不写死：按光标所在显示器可用工作区取宽 `60%`、高 `80%`，并在该工作区居中；
+- 设计下限为 `900 x 640`；显示器工作区小于该下限时，以实际可用尺寸封顶，同时把最小可缩放尺寸降到工作区范围；
+- 初始宽高比约束在 `1.2-1.6`，避免竖屏生成过高窗口、超宽屏生成过宽窗口；
 - 顶部工具栏固定，内容区独立滚动；
 - 不在桌面窗口宽度内切换成占满首屏的纵向导航；
 - 浏览器级窄屏预览允许单列，但 Electron 最小宽度保证主流程稳定。
@@ -197,7 +198,9 @@ EasyConnect Workbench
 - 字号不随 viewport 宽度缩放；
 - 所有 letter spacing 为 `0`；
 - 状态不能只依赖颜色，必须同时有图标和文本；
-- 按钮尺寸固定，动态文案不改变布局。
+- 按钮尺寸固定，动态文案不改变布局；
+- 初始窗口按光标所在显示器可用工作区计算：宽 `60%`、高 `80%`，设计下限 `900x640`，并用 `1.2-1.6` 宽高比避免竖屏过高或超宽屏过宽；
+- app shell 使用 `100dvh`，常规内容优先通过高度断点压缩间距，确实放不下时只由主内容区滚动，不产生 body 与内容双滚动条。
 
 ## 7. 组件边界
 
@@ -207,6 +210,7 @@ EasyConnect Workbench
 - `collectConfig` / `applyConfig` 只处理 `app` 和 `vpn`；
 - 状态渲染、活动渲染、设置抽屉和动作反馈分别使用小函数；
 - renderer 不拥有自动启动策略，只读取状态并触发明确用户动作；
+- 主内容宽度在常规窗口保持约 `992px`，大窗口按 `72vw` 扩展，低于 `760px` 高度时切换紧凑纵向间距；
 - 不保留平台列表、平台凭据和 API 原始结果 helper。
 
 ### Preload
@@ -218,7 +222,7 @@ EasyConnect Workbench
 - 保留 `VpnService`、`VpnMaintainer`、`maybeStartMaintainerAutoStart` 和托盘；
 - 删除平台 client import 和 `platform:*` handlers；
 - 主进程继续拥有自动启动、quiet hours 和敏感能力；
-- BrowserWindow 改为新的稳定尺寸与中性背景色。
+- BrowserWindow 使用当前显示器工作区比例、像素下限和宽高比约束计算初始 bounds，并使用中性背景色。
 
 ### ConfigStore
 
@@ -283,10 +287,12 @@ flowchart LR
 ### 视觉与交互
 
 - 用 Playwright stub preload 状态，不启动 Electron 主进程；
-- 截图并检查 `1040x720`、`900x640` 和窄屏浏览器预览；
+- 检查 `1536x1152`、`1152x864`、`900x720`、`900x640` 和 `720x760` 视口；前 3 档常规概览不滚动，内容确实超出时只滚动主内容区；
 - 验证无空白画面、重叠、截断、溢出或动态布局跳动；
 - 验证 overview/activity、设置抽屉、密码显示、折叠诊断、busy/disabled 和错误状态；
 - 检查控制台无未预期错误。
+
+Workbench renderer 的界面可用性以上述无头浏览器 QA 为准。Electron 运行层由源码版和打包版 lifecycle、hidden-start smoke，以及托盘与 IPC 的单元/契约测试补足，这些检查不要求 macOS 屏幕可见；真实第二实例锁竞争不作为本轮 UI 验收证据。`--smoke-official-ui-repair --smoke-require-ui-repair` 验证的是第三方 EasyConnect 原生窗口修复，只作为解锁桌面下的独立人工诊断，不是 VPN-only MVP 的硬门禁。
 
 ## 11. 最终功能验收
 
@@ -297,11 +303,11 @@ flowchart LR
 3. 安装或启动新的 Workbench 产物；
 4. 确认当前不在 quiet hours 后，受控断开官方 EasyConnect 核心连接；
 5. 验证 Workbench 自动检测离线并执行真实恢复，首轮动作不能是 `already-online`；
-6. 验证新 session 在线、service state 健康、官方 UI 一致、配置未被污染；
+6. 验证新 session 在线、service state 健康、官方 UI 后台检查已结构化记录且未覆盖隧道结论、配置未被污染；
 7. 验证 quiet hours、托盘常驻、窗口隐藏和 CPU 空闲；
 8. 失败时停止继续扰动，优先恢复连接并记录具体 blocker。
 
-验收成功必须同时满足代码测试、打包、真实恢复和 UI 视觉检查，不能用单一 screenshot、HTTP 200 或 compile 代替。
+验收成功必须同时满足代码测试、打包、真实恢复和无头浏览器 UI 检查，不能用单一 screenshot、HTTP 200 或 compile 代替。第三方 EasyConnect 原生窗口的严格前台修复可以单独记录结果，但不覆盖隧道在线结论，也不阻塞本产品验收。
 
 ## 12. 交付与回退
 

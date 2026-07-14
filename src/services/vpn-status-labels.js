@@ -48,6 +48,15 @@ export function describeMaintainerEvent(event) {
       };
     }
 
+    if (event.result?.action === "keepalive-deferred-active-action") {
+      const retrySeconds = Math.max(1, Math.round(Number(event.result?.nextIntervalMs ?? 0) / 1000));
+      return {
+        title: "自动检查已顺延",
+        detail: `当前正在执行手动操作，后台 keepalive 未并发介入；将在 ${retrySeconds} 秒后自动重试。`,
+        variant: "idle",
+      };
+    }
+
     if (event.result?.action === "relogin-page-bridge") {
       return {
         title: "主链路恢复成功",

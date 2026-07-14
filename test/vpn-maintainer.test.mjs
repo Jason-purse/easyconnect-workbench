@@ -1,9 +1,317 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { createVpnActionGuard } from "../src/services/vpn-action-guard.js";
+
 async function loadVpnMaintainer() {
   return import("../src/services/vpn-maintainer.js").catch(() => ({}));
 }
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
+test("VpnMaintainer holds the shared VPN guard for the full automatic cycle", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const guard = createVpnActionGuard();
+  const cycleEntered = createDeferred();
+  const releaseCycle = createDeferred();
+  let manualCalls = 0;
+
+  const manager = new VpnMaintainer({
+    actionRunner: (key, operation) => guard.run(key, operation, { scope: "maintainer" }),
+    runtimeFactory: () => ({
+      async disableOfficialAutoConnectBeforeLaunch() {
+        return { ok: true, action: "disabled" };
+      },
+    }),
+    ensureOnlineFn: async () => {
+      cycleEntered.resolve();
+      await releaseCycle.promise;
+      return { action: "already-online" };
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle, signal }) => {
+      const result = await ensureOnlineFn({ signal });
+      await onCycle({ ok: true, result });
+      await new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", resolve, { once: true });
+      });
+    },
+  });
+
+  const started = manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+    },
+  });
+
+  try {
+    await cycleEntered.promise;
+    await assert.rejects(
+      guard.run("recover-login", () => {
+        manualCalls += 1;
+        return { ok: true };
+      }),
+      (error) => {
+        assert.equal(error.code, "EASYCONNECT_VPN_ACTION_IN_PROGRESS");
+        assert.equal(error.activeKey, "maintainer-cycle");
+        return true;
+      },
+    );
+    assert.equal(manualCalls, 0);
+  } finally {
+    releaseCycle.resolve();
+    await started;
+    await manager.stop();
+  }
+});
+
+test("VpnMaintainer holds the shared VPN guard while disabling official auto-connect", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const guard = createVpnActionGuard();
+  const initializationEntered = createDeferred();
+  const releaseInitialization = createDeferred();
+  let manualCalls = 0;
+
+  const manager = new VpnMaintainer({
+    actionRunner: (key, operation) => guard.run(key, operation, { scope: "maintainer" }),
+    runtimeFactory: () => ({
+      async disableOfficialAutoConnectBeforeLaunch() {
+        initializationEntered.resolve();
+        await releaseInitialization.promise;
+        return { ok: true, action: "disabled" };
+      },
+    }),
+    maintainOnlineFn: async ({ signal }) => {
+      await new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", resolve, { once: true });
+      });
+    },
+  });
+  const started = manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+    },
+  });
+
+  try {
+    await initializationEntered.promise;
+    await assert.rejects(
+      guard.run("recover-login", () => {
+        manualCalls += 1;
+        return { ok: true };
+      }),
+      (error) => {
+        assert.equal(error.code, "EASYCONNECT_VPN_ACTION_IN_PROGRESS");
+        assert.equal(error.activeKey, "maintainer-initialize");
+        return true;
+      },
+    );
+    assert.equal(manualCalls, 0);
+  } finally {
+    releaseInitialization.resolve();
+    await started;
+    await manager.stop();
+  }
+});
+
+test("VpnMaintainer coalesces concurrent starts before initialization completes", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const initializationEntered = createDeferred();
+  const releaseInitialization = createDeferred();
+  const finishLoops = [];
+  let runtimeCount = 0;
+  let loopCount = 0;
+
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => {
+      runtimeCount += 1;
+      return {
+        async disableOfficialAutoConnectBeforeLaunch() {
+          initializationEntered.resolve();
+          await releaseInitialization.promise;
+          return { ok: true, action: "disabled" };
+        },
+      };
+    },
+    maintainOnlineFn: async () => {
+      loopCount += 1;
+      await new Promise((resolve) => finishLoops.push(resolve));
+    },
+  });
+  const config = {
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+    },
+  };
+  const first = manager.start(config);
+  await initializationEntered.promise;
+  const second = manager.start(config);
+
+  try {
+    releaseInitialization.resolve();
+    await Promise.all([first, second]);
+    assert.equal(runtimeCount, 1);
+    assert.equal(loopCount, 1);
+  } finally {
+    releaseInitialization.resolve();
+    finishLoops.forEach((finish) => finish());
+    await Promise.allSettled([first, second]);
+    await manager.stop();
+  }
+});
+
+test("VpnMaintainer stop waits for an in-flight start to publish its execution", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const startEventEntered = createDeferred();
+  const releaseStartEvent = createDeferred();
+
+  const manager = new VpnMaintainer({
+    eventLogger: {
+      async write(event) {
+        if (event === "maintainer-started") {
+          startEventEntered.resolve();
+          await releaseStartEvent.promise;
+        }
+      },
+    },
+    runtimeFactory: () => ({
+      async disableOfficialAutoConnectBeforeLaunch() {
+        return { ok: true, action: "disabled" };
+      },
+    }),
+    maintainOnlineFn: async ({ signal }) => {
+      await new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", resolve, { once: true });
+      });
+    },
+  });
+  const config = {
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+    },
+  };
+  const startPromise = manager.start(config);
+
+  await startEventEntered.promise;
+  let stopResolved = false;
+  const stopPromise = manager.stop().then((status) => {
+    stopResolved = true;
+    return status;
+  });
+
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stopResolved, false);
+    assert.equal(manager.getStatus().running, true);
+
+    releaseStartEvent.resolve();
+    await startPromise;
+    const stopped = await stopPromise;
+    assert.equal(stopped.running, false);
+  } finally {
+    releaseStartEvent.resolve();
+    await Promise.allSettled([startPromise, stopPromise]);
+    await manager.stop();
+  }
+});
+
+test("VpnMaintainer defers an automatic cycle while a manual VPN action owns the guard", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const guard = createVpnActionGuard();
+  const manualAction = createDeferred();
+  const beginCycle = createDeferred();
+  const cycleRecorded = createDeferred();
+  let ensureCalls = 0;
+  let cycleEvent = null;
+  let cycleControl = null;
+
+  let activeManual = null;
+  const manager = new VpnMaintainer({
+    actionRunner: (key, operation) => guard.run(key, operation, { scope: "maintainer" }),
+    runtimeFactory: () => ({
+      async disableOfficialAutoConnectBeforeLaunch() {
+        return { ok: true, action: "disabled" };
+      },
+    }),
+    ensureOnlineFn: async () => {
+      ensureCalls += 1;
+      return { action: "already-online" };
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle, signal }) => {
+      await beginCycle.promise;
+      try {
+        cycleEvent = {
+          ok: true,
+          result: await ensureOnlineFn({ signal }),
+        };
+      } catch (error) {
+        cycleEvent = { ok: false, error };
+      }
+      cycleControl = await onCycle(cycleEvent);
+      cycleRecorded.resolve();
+      await new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", resolve, { once: true });
+      });
+    },
+  });
+
+  try {
+    await manager.start({
+      vpn: {
+        username: "demo-user",
+        password: "secret",
+        gateways: [{ host: "198.51.100.20", port: 9898 }],
+        maintainerIntervalSeconds: 300,
+      },
+    });
+    activeManual = guard.run("recover-login", () => manualAction.promise);
+    beginCycle.resolve();
+    await cycleRecorded.promise;
+
+    assert.equal(ensureCalls, 0);
+    assert.equal(cycleEvent.ok, true);
+    assert.equal(cycleEvent.result.action, "keepalive-deferred-active-action");
+    assert.equal(cycleEvent.result.activeAction, "recover-login");
+    assert.deepEqual(cycleControl, { nextIntervalMs: 30000 });
+    assert.equal(manager.getStatus().lastError, null);
+  } finally {
+    beginCycle.resolve();
+    manualAction.resolve({ ok: true });
+    await activeManual;
+    await manager.stop();
+  }
+});
 
 test("VpnMaintainer starts with configured gateway and captures cycle results", async () => {
   const { VpnMaintainer } = await loadVpnMaintainer();
@@ -1949,6 +2257,158 @@ test("VpnMaintainer stops same-cycle gateway retries after same-user private kic
 
   finishLoop();
   await manager.stop();
+});
+
+test("VpnMaintainer stays draining and keeps the guard while a timed-out cycle is still running", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const guard = createVpnActionGuard();
+  const stuckCycle = createDeferred();
+  let ensureCalls = 0;
+  let stopPromise = null;
+
+  const manager = new VpnMaintainer({
+    actionRunner: (key, operation) => guard.run(key, operation, { scope: "maintainer" }),
+    runtimeFactory: () => ({
+      async disableOfficialAutoConnectBeforeLaunch() {
+        return { ok: true, action: "disabled" };
+      },
+    }),
+    ensureOnlineFn: async () => {
+      ensureCalls += 1;
+      return stuckCycle.promise;
+    },
+  });
+
+  try {
+    await manager.start(
+      {
+        vpn: {
+          username: "demo-user",
+          password: "secret",
+          gateways: [{ host: "198.51.100.20", port: 9898 }],
+          maintainerIntervalSeconds: 1,
+        },
+      },
+      { cycleTimeoutMs: 5 },
+    );
+
+    const deadline = Date.now() + 500;
+    while (manager.getStatus().cycleCount < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const draining = manager.getStatus();
+    assert.equal(ensureCalls, 1);
+    assert.equal(draining.running, true);
+    assert.equal(draining.draining, true);
+    assert.equal(draining.lastEvent?.code, "MAINTAINER_CYCLE_TIMEOUT");
+    await assert.rejects(
+      guard.run("recover-login", () => ({ ok: true })),
+      (error) => error.code === "EASYCONNECT_VPN_ACTION_IN_PROGRESS",
+    );
+
+    let stopped = false;
+    stopPromise = manager.stop().then((status) => {
+      stopped = true;
+      return status;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(stopped, false);
+
+    stuckCycle.resolve({ action: "already-online" });
+    const stoppedStatus = await stopPromise;
+    assert.equal(stoppedStatus.running, false);
+    assert.equal(stoppedStatus.draining, false);
+    assert.deepEqual(await guard.run("recover-login", () => ({ ok: true })), { ok: true });
+  } finally {
+    stuckCycle.resolve({ action: "already-online" });
+    await (stopPromise ?? manager.stop());
+  }
+});
+
+test("VpnMaintainer resumes keepalive after a timed-out cycle finishes draining", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const { maintainOnline } = await import("../src/easyconnect-bridge/maintainer.mjs");
+  let ensureCalls = 0;
+  let sleepCalls = 0;
+
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({
+      async disableOfficialAutoConnectBeforeLaunch() {
+        return { ok: true, action: "disabled" };
+      },
+    }),
+    ensureOnlineFn: ({ signal }) => {
+      ensureCalls += 1;
+      if (ensureCalls === 1) {
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              setTimeout(() => {
+                reject(Object.assign(new Error("delayed abort cleanup"), { name: "AbortError" }));
+              }, 20);
+            },
+            { once: true },
+          );
+        });
+      }
+
+      return Promise.resolve({ action: "already-online" });
+    },
+    maintainOnlineFn: (options) =>
+      maintainOnline({
+        ...options,
+        sleep: async (_ms, signal) => {
+          sleepCalls += 1;
+          if (sleepCalls === 1) {
+            return;
+          }
+          await new Promise((resolve) => {
+            if (signal.aborted) {
+              resolve();
+              return;
+            }
+            signal.addEventListener("abort", resolve, { once: true });
+          });
+        },
+      }),
+  });
+
+  try {
+    await manager.start(
+      {
+        vpn: {
+          username: "demo-user",
+          password: "secret",
+          gateways: [{ host: "198.51.100.20", port: 9898 }],
+          maintainerIntervalSeconds: 1,
+        },
+      },
+      { cycleTimeoutMs: 5 },
+    );
+
+    const drainDeadline = Date.now() + 500;
+    while (!manager.getStatus().draining && Date.now() < drainDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    assert.equal(manager.getStatus().draining, true);
+
+    const recoveryDeadline = Date.now() + 500;
+    while (manager.getStatus().cycleCount < 2 && Date.now() < recoveryDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+
+    const resumed = manager.getStatus();
+    assert.equal(ensureCalls, 2);
+    assert.equal(resumed.running, true);
+    assert.equal(resumed.draining, false);
+    assert.equal(resumed.cycleCount, 2);
+    assert.equal(resumed.lastEvent?.ok, true);
+    assert.equal(resumed.lastEvent?.result?.action, "already-online");
+  } finally {
+    await manager.stop();
+  }
 });
 
 test("maintainOnline times out a stuck cycle and continues with the next interval", async () => {
