@@ -8,6 +8,7 @@ It does not include or replace EasyConnect, and it does not bypass authenticatio
 
 - Automatically logs in and restores the VPN through the installed official EasyConnect client.
 - Keeps the connection alive with lightweight checks and controlled recovery attempts.
+- Verifies a configured internal endpoint through a `utun*` route before claiming the connection is protected.
 - Respects configurable quiet hours, including the default `18:30-09:00` overnight pause.
 - Lives in the macOS tray and shows the current connection, maintainer, gateway, session, and service state.
 - Keeps account, gateway, launch-at-login, interval, and diagnostic settings local to this machine.
@@ -83,6 +84,8 @@ Workbench stores its local config under the app's user data directory, for examp
 The current app stores the VPN password in local JSON. Protect the machine and never commit or share this file.
 
 Gateway examples in tests and docs use documentation-only addresses such as `203.0.113.10` and `198.51.100.20`. Replace them with your own authorized gateway inside the app UI or local config.
+
+Configure an authorized internal data-plane target in Settings to distinguish a usable tunnel from stale local EasyConnect state. Supported forms are `tcp://host:port`, `http://host/path`, and `https://host/path`; for example, `tcp://192.0.2.10:443`. A successful probe only counts when macOS routes the selected address through a `utun*` interface. Workbench reports the connection as unverified when no target is configured, and it never ships with a private target as a default.
 
 ## Project Boundary
 

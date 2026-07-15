@@ -6,6 +6,16 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import { ConfigStore, DEFAULT_CONFIG } from "../src/services/config-store.js";
 
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 test("DEFAULT_CONFIG keeps maintainer auto-start disabled by default", () => {
   assert.equal(DEFAULT_CONFIG.app.launchAtLogin, false);
   assert.equal(DEFAULT_CONFIG.vpn.maintainerAutoStart, false);
@@ -14,6 +24,8 @@ test("DEFAULT_CONFIG keeps maintainer auto-start disabled by default", () => {
   assert.equal(DEFAULT_CONFIG.vpn.maintainerQuietHoursEnabled, true);
   assert.equal(DEFAULT_CONFIG.vpn.maintainerQuietStart, "18:30");
   assert.equal(DEFAULT_CONFIG.vpn.maintainerQuietEnd, "09:00");
+  assert.equal(DEFAULT_CONFIG.vpn.dataPlaneProbeTarget, "");
+  assert.equal(DEFAULT_CONFIG.vpn.dataPlaneProbeTimeoutMs, 5000);
   assert.equal(DEFAULT_CONFIG.vpn.lastKnownGateway, null);
   assert.equal(Object.hasOwn(DEFAULT_CONFIG, "portals"), false);
 });
@@ -130,6 +142,36 @@ test("ConfigStore persists maintainer auto-start and interval settings", async (
   }
 });
 
+test("ConfigStore persists data-plane probe settings without replacing VPN credentials", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "easyconnect-workbench-config-"));
+
+  try {
+    const store = new ConfigStore(tempDir);
+    await store.save({
+      vpn: {
+        username: "demo-user",
+        password: "secret",
+        gateways: [{ host: "203.0.113.10", port: 9898 }],
+      },
+    });
+
+    const saved = await store.save({
+      vpn: {
+        dataPlaneProbeTarget: "  tcp://192.168.150.199:1521  ",
+        dataPlaneProbeTimeoutMs: "2400",
+      },
+    });
+
+    assert.equal(saved.vpn.dataPlaneProbeTarget, "tcp://192.168.150.199:1521");
+    assert.equal(saved.vpn.dataPlaneProbeTimeoutMs, 2400);
+    assert.equal(saved.vpn.username, "demo-user");
+    assert.equal(saved.vpn.password, "secret");
+    assert.deepEqual(saved.vpn.gateways, [{ host: "203.0.113.10", port: 9898 }]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("ConfigStore persists lastKnownGateway as structured vpn state", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "easyconnect-workbench-config-"));
 
@@ -182,6 +224,49 @@ test("ConfigStore keeps learned gateways when a save omits the gateway list", as
     assert.deepEqual(saved.vpn.gateways, [{ host: "203.0.113.10", port: 9898 }]);
     assert.deepEqual(saved.vpn.lastKnownGateway, { host: "203.0.113.10", port: 9898 });
   } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("ConfigStore serializes atomic updates with concurrent user saves", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "easyconnect-workbench-config-"));
+  const updateEntered = createDeferred();
+  const releaseUpdate = createDeferred();
+
+  try {
+    const store = new ConfigStore(tempDir);
+    await store.save({
+      vpn: {
+        dataPlaneProbeTarget: "tcp://192.0.2.10:1521",
+      },
+    });
+
+    const backgroundUpdate = store.update(async (current) => {
+      updateEntered.resolve();
+      await releaseUpdate.promise;
+      return {
+        ...current,
+        vpn: {
+          ...current.vpn,
+          lastKnownGateway: { host: "203.0.113.10", port: 9898 },
+        },
+      };
+    });
+    await updateEntered.promise;
+
+    const userSave = store.save({
+      vpn: {
+        dataPlaneProbeTarget: "tcp://192.0.2.11:1521",
+      },
+    });
+    releaseUpdate.resolve();
+    await Promise.all([backgroundUpdate, userSave]);
+
+    const loaded = await store.load();
+    assert.equal(loaded.vpn.dataPlaneProbeTarget, "tcp://192.0.2.11:1521");
+    assert.deepEqual(loaded.vpn.lastKnownGateway, { host: "203.0.113.10", port: 9898 });
+  } finally {
+    releaseUpdate.resolve();
     await rm(tempDir, { recursive: true, force: true });
   }
 });

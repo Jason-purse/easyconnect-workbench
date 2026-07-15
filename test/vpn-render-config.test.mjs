@@ -18,6 +18,7 @@ test("mergeConfigForRender prefers current form values but keeps learned gateway
         username: "old-user",
         password: "old-secret",
         appExecutable: "/old/EasyConnect",
+        dataPlaneProbeTimeoutMs: 2400,
         gateways: [{ host: "203.0.113.10", port: 9898 }],
         lastKnownGateway: { host: "203.0.113.10", port: 9898 },
       },
@@ -27,6 +28,7 @@ test("mergeConfigForRender prefers current form values but keeps learned gateway
   assert.equal(merged.vpn.username, "demo-user");
   assert.equal(merged.vpn.password, "secret");
   assert.equal(merged.vpn.appExecutable, "/custom/EasyConnect");
+  assert.equal(merged.vpn.dataPlaneProbeTimeoutMs, 2400);
   assert.deepEqual(merged.vpn.gateways, [{ host: "203.0.113.10", port: 9898 }]);
   assert.deepEqual(merged.vpn.lastKnownGateway, { host: "203.0.113.10", port: 9898 });
 });

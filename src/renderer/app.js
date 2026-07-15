@@ -5,6 +5,7 @@ import {
 import { describeMaintainerEvent } from "../services/vpn-status-labels.js";
 import {
   formatAllowedGateways,
+  formatDataPlaneProbe,
   formatGateway,
   formatGatewayProbeResults,
   formatMaintainerAction,
@@ -24,6 +25,7 @@ import {
   deriveMaintainerSchedule,
   deriveMaintainerView,
   describeMaintainerStartResult,
+  resolveDataPlaneForRender,
 } from "./view-state.js";
 import { IPC_TIMEOUT_MS, runIpcAction } from "./ipc-action-runner.js";
 import { createLatestRequestCoordinator } from "./refresh-coordinator.js";
@@ -55,6 +57,7 @@ const elements = {
   vpnQuietEnd: $("vpn-quiet-end"),
   vpnAppExecutable: $("vpn-app-executable"),
   vpnGateways: $("vpn-gateways"),
+  vpnDataPlaneProbeTarget: $("vpn-data-plane-probe-target"),
   connectionBand: document.querySelector(".connection-band"),
   connectionState: $("connection-state"),
   connectionTitle: $("connection-title"),
@@ -65,6 +68,7 @@ const elements = {
   metricSessionId: $("metric-session-id"),
   metricClientState: $("metric-client-state"),
   metricOfficialUi: $("metric-official-ui"),
+  metricDataPlane: $("metric-data-plane"),
   metricPreferredGateway: $("metric-preferred-gateway"),
   metricMaintainerState: $("metric-maintainer-state"),
   metricMaintainerInterval: $("metric-maintainer-interval"),
@@ -399,6 +403,7 @@ function collectConfig() {
       maintainerQuietStart: elements.vpnQuietStart.value || "18:30",
       maintainerQuietEnd: elements.vpnQuietEnd.value || "09:00",
       appExecutable: elements.vpnAppExecutable.value.trim(),
+      dataPlaneProbeTarget: elements.vpnDataPlaneProbeTarget.value.trim(),
       gateways: elements.vpnGateways.value
         .split("\n")
         .map((line) => line.trim())
@@ -425,6 +430,7 @@ function applyConfig(config) {
   elements.vpnQuietStart.value = config.vpn?.maintainerQuietStart ?? "18:30";
   elements.vpnQuietEnd.value = config.vpn?.maintainerQuietEnd ?? "09:00";
   elements.vpnAppExecutable.value = config.vpn?.appExecutable ?? "";
+  elements.vpnDataPlaneProbeTarget.value = config.vpn?.dataPlaneProbeTarget ?? "";
   elements.vpnGateways.value = (config.vpn?.gateways ?? [])
     .map((item) => item.host + ":" + item.port)
     .join("\n");
@@ -531,6 +537,7 @@ function renderStatus(status, environmentInfo, config, maintainerStatus) {
         : "客户端未发现",
   );
   setNodeText(elements.metricOfficialUi, formatOfficialUiMetric(status.officialUi));
+  setNodeText(elements.metricDataPlane, formatDataPlaneProbe(status.dataPlane));
   setNodeText(elements.metricPreferredGateway, fallbackGateway);
   setNodeText(elements.metricAllowedGateways, formatAllowedGateways(config).replaceAll("\n", " / "));
   setNodeText(elements.vpnStatus, safeStringify(sanitizeVpnStatusForDisplay(status)));
@@ -569,7 +576,7 @@ function scheduleMaintainerRefresh(maintainerStatus, maintainerView = deriveMain
 
     maintainerRefreshInFlight = true;
     try {
-      await refreshStatus({ silent: true });
+      await refreshStatus({ silent: true, includeDataPlane: false });
     } catch {
       scheduleMaintainerRefresh(maintainerStatus, maintainerView);
     } finally {
@@ -606,6 +613,7 @@ async function refreshStatus(options = {}) {
           config: currentConfig,
           audit: options.audit ?? false,
           auditTrigger: options.auditTrigger ?? "manual-refresh",
+          includeDataPlane: options.includeDataPlane !== false,
         }),
         { timeoutMs: REFRESH_TIMEOUT_MS.snapshot },
       );
@@ -618,6 +626,12 @@ async function refreshStatus(options = {}) {
         }),
       ]);
       const renderConfig = mergeConfigForRender(currentConfig, storedConfig);
+      const renderStatus = {
+        ...status,
+        dataPlane: resolveDataPlaneForRender(status, maintainerStatus, {
+          dataPlane: options.dataPlane,
+        }),
+      };
       const displayEnvironmentInfo = sanitizeEnvironmentInfoForDisplay(environmentInfo, renderConfig);
       const recoveryPlan = await runIpcAction(
         "读取恢复计划",
@@ -630,7 +644,7 @@ async function refreshStatus(options = {}) {
 
       return {
         config: renderConfig,
-        status,
+        status: renderStatus,
         environmentInfo: displayEnvironmentInfo,
         maintainerStatus,
         recoveryPlan,
@@ -725,7 +739,11 @@ async function recoverAndLogin() {
   );
   const summary = describeMaintainerEvent({ ok: true, result });
   try {
-    await refreshStatus({ silent: true });
+    await refreshStatus({
+      silent: true,
+      includeDataPlane: false,
+      dataPlane: result.dataPlane,
+    });
     showActionNotice(summary.title, summary.detail, summary.variant);
   } catch (error) {
     const detail = error?.message ?? String(error);
@@ -754,7 +772,7 @@ async function repairOfficialUi() {
   renderDiagnosticResult(result);
   let refreshError = null;
   try {
-    await refreshStatus({ silent: true });
+    await refreshStatus({ silent: true, includeDataPlane: false });
   } catch (error) {
     refreshError = error;
   }
@@ -837,7 +855,7 @@ async function startMaintainer() {
     );
     let refreshError = null;
     try {
-      await refreshStatus({ silent: true });
+      await refreshStatus({ silent: true, includeDataPlane: false });
     } catch (error) {
       refreshError = error;
     }
@@ -868,7 +886,7 @@ async function stopMaintainer() {
       timeoutMs: IPC_TIMEOUT_MS.recovery,
     }),
   );
-  await refreshStatus({ silent: true });
+  await refreshStatus({ silent: true, includeDataPlane: false });
   showActionNotice("自动守护已停止", "后台检查已停止，可随时重新启动。", "success");
   return result;
 }

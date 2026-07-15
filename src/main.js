@@ -737,12 +737,13 @@ function registerIpc() {
 
   ipcMain.handle("config:save", async (_event, nextConfig) => {
     const saved = await configStore.save(nextConfig);
+    vpnMaintainer.updateDataPlaneProbeConfig(saved);
     applyLoginItemSettings(saved);
     return saved;
   });
 
   ipcMain.handle("vpn:snapshot", async (_event, payload = {}) => {
-    const config = payload.config ?? (await configStore.load());
+    const config = await resolveConfig(payload);
     const shouldAudit = Boolean(payload.audit);
     const auditTrigger = payload.auditTrigger ?? "manual-refresh";
     if (shouldAudit) {
@@ -753,7 +754,15 @@ function registerIpc() {
 
     let snapshot = null;
     try {
-      snapshot = await vpnService.getSnapshot(config);
+      snapshot = await vpnService.getSnapshot(config, {
+        includeDataPlane: payload.includeDataPlane !== false,
+      });
+      if (payload.includeDataPlane !== false && snapshot.status?.dataPlane) {
+        vpnMaintainer.recordDataPlaneObservation(snapshot.status.dataPlane, {
+          config,
+          status: snapshot.status,
+        });
+      }
     } catch (error) {
       if (shouldAudit) {
         await writeAppEvent("manual-refresh-status-failed", {
@@ -765,11 +774,7 @@ function registerIpc() {
       throw error;
     }
 
-    const storedConfig = await configStore.load();
-    const hintedConfig = applySnapshotHints(storedConfig, snapshot);
-    if (hintedConfig !== storedConfig) {
-      await configStore.save(hintedConfig);
-    }
+    await configStore.update((storedConfig) => applySnapshotHints(storedConfig, snapshot));
     if (shouldAudit) {
       await writeAppEvent("manual-refresh-status-completed", {
         trigger: auditTrigger,
@@ -779,7 +784,14 @@ function registerIpc() {
     }
     return snapshot;
   });
-  ipcMain.handle("vpn:status", async () => vpnService.getStatus(await configStore.load()));
+  ipcMain.handle("vpn:status", async () => {
+    const config = await configStore.load();
+    const status = await vpnService.getStatus(config);
+    if (status?.dataPlane) {
+      vpnMaintainer.recordDataPlaneObservation(status.dataPlane, { config, status });
+    }
+    return status;
+  });
   ipcMain.handle("vpn:info", async () => vpnService.getEnvironmentInfo(await configStore.load()));
   ipcMain.handle("vpn:recovery-plan", async (_event, payload = {}) =>
     vpnService.getRecoveryPlan(await resolveConfig(payload), payload.gatewayCandidates ?? []),
@@ -787,11 +799,7 @@ function registerIpc() {
   ipcMain.handle("vpn:probe-recovery", async (_event, payload = {}) => {
     const config = await resolveConfig(payload);
     const results = await vpnService.probeRecoveryGateways(config, payload.gatewayCandidates ?? []);
-    const storedConfig = await configStore.load();
-    const hintedConfig = applyProbeHints(storedConfig, results);
-    if (hintedConfig !== storedConfig) {
-      await configStore.save(hintedConfig);
-    }
+    await configStore.update((storedConfig) => applyProbeHints(storedConfig, results));
     return results;
   });
 
@@ -855,10 +863,14 @@ function registerIpc() {
       }
 
       if (result.gateway?.host && result.gateway?.port) {
-        const hintedConfig = applyGatewaySelectionHint(config, result.gateway);
-        if (hintedConfig !== config) {
-          await configStore.save(hintedConfig);
-        }
+        await configStore.update((storedConfig) => applyGatewaySelectionHint(storedConfig, result.gateway));
+      }
+
+      if (result.dataPlane) {
+        vpnMaintainer.recordDataPlaneObservation(result.dataPlane, {
+          config,
+          status: result.online ?? result,
+        });
       }
 
       await writeAppEvent("manual-recover-login-completed", {
@@ -952,17 +964,15 @@ app.whenReady().then(async () => {
   vpnMaintainer = new VpnMaintainer({
     eventLogger: maintainerLogger,
     actionRunner: runMaintainerAction,
+    dataPlaneProbeFn: (config, options) => vpnService.probeDataPlane(config, options),
     repairOfficialUiFn: (config, options) => vpnService.repairOfficialUi(config, options),
-    onGatewaySelected: async (gateway) => {
-      const config = await configStore.load();
-      const hintedConfig = applyGatewaySelectionHint(config, gateway);
-      if (hintedConfig !== config) {
-        await configStore.save(hintedConfig);
-      }
-    },
+    onGatewaySelected: (gateway) =>
+      configStore.update((config) => applyGatewaySelectionHint(config, gateway)),
   });
   registerIpc();
-  applyLoginItemSettings(await configStore.load());
+  const initialConfig = await configStore.load();
+  vpnMaintainer.updateDataPlaneProbeConfig(initialConfig);
+  applyLoginItemSettings(initialConfig);
   if (hasArg("--smoke-vpn-autostart")) {
     try {
       await runVpnAutostartSmoke();

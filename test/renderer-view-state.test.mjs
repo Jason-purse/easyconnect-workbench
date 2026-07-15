@@ -7,12 +7,16 @@ import {
   deriveMaintainerSchedule,
   deriveMaintainerView,
   describeMaintainerStartResult,
+  resolveDataPlaneForRender,
 } from "../src/renderer/view-state.js";
 
 test("online state exposes refresh as the single primary action", () => {
   assert.deepEqual(
     deriveConnectionView({
-      status: { loginStatus: { status: "1" } },
+      status: {
+        loginStatus: { status: "1" },
+        dataPlane: { configured: true, ok: true, state: "reachable" },
+      },
       environmentInfo: { appExecutableExists: true },
       maintainerStatus: { running: true },
     }),
@@ -23,6 +27,138 @@ test("online state exposes refresh as the single primary action", () => {
       primaryAction: "refresh",
       primaryLabel: "立即检查",
     },
+  );
+});
+
+test("control-plane online does not claim protection when the data plane is unreachable", () => {
+  const view = deriveConnectionView({
+    status: {
+      loginStatus: { status: "1" },
+      dataPlane: {
+        configured: true,
+        ok: false,
+        state: "unreachable",
+        target: "tcp://192.168.150.199:1521",
+      },
+    },
+    environmentInfo: { appExecutableExists: true },
+    maintainerStatus: { running: true },
+  });
+
+  assert.equal(view.tone, "warning");
+  assert.equal(view.label, "数据通道异常");
+  assert.equal(view.title, "内网连接不可达");
+  assert.equal(view.primaryAction, "refresh");
+  assert.equal(view.primaryLabel, "重新检查");
+});
+
+test("control-plane online remains unverified until a probe target is configured", () => {
+  const view = deriveConnectionView({
+    status: {
+      loginStatus: { status: "1" },
+      dataPlane: { configured: false, ok: null, state: "unconfigured" },
+    },
+    environmentInfo: { appExecutableExists: true },
+    maintainerStatus: { running: true },
+  });
+
+  assert.equal(view.tone, "warning");
+  assert.equal(view.label, "连接未验证");
+  assert.equal(view.title, "需要配置连接验证");
+  assert.equal(view.primaryAction, "open-settings");
+  assert.equal(view.primaryLabel, "配置探活目标");
+});
+
+test("control-plane online waits for a current probe instead of reporting failure", () => {
+  const view = deriveConnectionView({
+    status: {
+      loginStatus: { status: "1" },
+      dataPlane: {
+        configured: true,
+        ok: null,
+        state: "pending",
+        target: "tcp://192.0.2.11:1521",
+      },
+    },
+    environmentInfo: { appExecutableExists: true },
+    maintainerStatus: { running: true },
+  });
+
+  assert.equal(view.tone, "warning");
+  assert.equal(view.label, "连接待复核");
+  assert.equal(view.title, "等待数据通道检查");
+  assert.equal(view.primaryAction, "refresh");
+  assert.equal(view.primaryLabel, "立即检查");
+});
+
+test("automatic refresh reuses only fresh evidence for the current probe target", () => {
+  const snapshotStatus = { loginStatus: { status: "1" } };
+  const currentMaintainerStatus = {
+    running: true,
+    intervalSeconds: 300,
+    dataPlaneProbe: {
+      configured: true,
+      ok: null,
+      state: "pending",
+      target: "tcp://192.0.2.11:1521",
+    },
+    lastEventAt: "2026-07-15T09:00:00.000Z",
+    lastEvent: {
+      ok: true,
+      result: {
+        dataPlane: {
+          configured: true,
+          ok: true,
+          state: "reachable",
+          target: "tcp://192.0.2.11:1521",
+        },
+      },
+    },
+  };
+
+  assert.equal(
+    resolveDataPlaneForRender(snapshotStatus, currentMaintainerStatus, {
+      nowMs: Date.parse("2026-07-15T09:00:01.000Z"),
+    }).ok,
+    true,
+  );
+
+  const changedTarget = {
+    ...currentMaintainerStatus,
+    dataPlaneProbe: {
+      ...currentMaintainerStatus.dataPlaneProbe,
+      target: "tcp://192.0.2.12:1521",
+    },
+  };
+  assert.deepEqual(
+    resolveDataPlaneForRender(snapshotStatus, changedTarget, {
+      nowMs: Date.parse("2026-07-15T09:00:01.000Z"),
+    }),
+    changedTarget.dataPlaneProbe,
+  );
+
+  const newerManualFailure = {
+    ...currentMaintainerStatus,
+    dataPlaneObservation: {
+      observedAt: "2026-07-15T09:00:02.000Z",
+      dataPlaneProbeRevision: 1,
+      activeSession: { sessionId: "session-1" },
+      loginStatus: { status: "1" },
+      dataPlane: {
+        configured: true,
+        ok: false,
+        state: "unreachable",
+        target: "tcp://192.0.2.11:1521",
+        code: "VPN_DATA_PLANE_UNREACHABLE",
+      },
+    },
+    dataPlaneProbeRevision: 1,
+  };
+  assert.equal(
+    resolveDataPlaneForRender(snapshotStatus, newerManualFailure, {
+      nowMs: Date.parse("2026-07-15T09:00:03.000Z"),
+    }).ok,
+    false,
   );
 });
 
@@ -141,7 +277,13 @@ test("local readiness failures wait for the next maintainer check instead of sta
 test("deriveMaintainerActivity records each completed maintainer event once", () => {
   const maintainerStatus = {
     lastEventAt: "2026-07-13T02:00:00.000Z",
-    lastEvent: { ok: true, result: { action: "already-online" } },
+    lastEvent: {
+      ok: true,
+      result: {
+        action: "already-online",
+        dataPlane: { configured: true, ok: true, state: "reachable" },
+      },
+    },
   };
   const first = deriveMaintainerActivity({ maintainerStatus, previousEventAt: null });
   assert.equal(first.eventAt, maintainerStatus.lastEventAt);

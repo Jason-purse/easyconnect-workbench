@@ -90,6 +90,7 @@
                 <div><span>连接详情</span><h2 id="health-heading">运行状态</h2></div>
               </div>
               <dl class="detail-list">
+                <div><dt>数据通道</dt><dd id="metric-data-plane">-</dd></div>
                 <div><dt>官方界面</dt><dd id="metric-official-ui">-</dd></div>
                 <div><dt>首选网关</dt><dd id="metric-preferred-gateway">-</dd></div>
                 <div><dt>允许网关</dt><dd id="metric-allowed-gateways">-</dd></div>
@@ -173,6 +174,14 @@
           <label class="field">
             <span>允许网关</span>
             <textarea id="vpn-gateways" rows="4" placeholder="每行一个，例如 203.0.113.10:9898"></textarea>
+          </label>
+        </section>
+
+        <section>
+          <h3>连接验证</h3>
+          <label class="field">
+            <span>内网探活目标</span>
+            <input id="vpn-data-plane-probe-target" type="url" spellcheck="false" placeholder="tcp://192.0.2.10:443" />
           </label>
         </section>
 

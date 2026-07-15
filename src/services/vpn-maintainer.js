@@ -2,10 +2,12 @@ import { EasyConnectRuntime } from "../easyconnect-bridge/runtime.mjs";
 import { EasyConnectGatewayLogin } from "../easyconnect-bridge/login.mjs";
 import { ensureOnline, maintainOnline } from "../easyconnect-bridge/maintainer.mjs";
 import { redactMaintainerEvent } from "./maintainer-log.js";
+import { describeVpnDataPlaneProbe } from "./vpn-data-plane-probe.js";
 import { collectRecoveryGateways } from "./vpn-gateway-pool.js";
 
 const LOCAL_SERVICE_FAILURE_BACKOFF_MS = 15 * 60 * 1000;
 const ACTIVE_ACTION_RETRY_MAX_MS = 30 * 1000;
+const DATA_PLANE_FAILURE_RETRY_MAX_MS = 30 * 1000;
 const OFFICIAL_UI_REPAIR_COOLDOWN_MS = 15 * 60 * 1000;
 const OFFICIAL_UI_POST_REPAIR_SETTLE_MS = 75 * 1000;
 const DEFAULT_QUIET_START = "18:30";
@@ -91,6 +93,11 @@ function sanitizeResult(result) {
 
 function cloneState(state) {
   return JSON.parse(JSON.stringify(state));
+}
+
+function getDataPlaneObservedAt(dataPlane, fallbackMs) {
+  const observedAt = `${dataPlane?.observedAt ?? ""}`;
+  return Number.isFinite(Date.parse(observedAt)) ? observedAt : new Date(fallbackMs).toISOString();
 }
 
 function getRemoteDebugPort(config = {}) {
@@ -245,6 +252,27 @@ function isRecoveryInfrastructureReadinessFailure(error) {
   ));
 }
 
+function isDataPlaneFailure(error) {
+  return `${error?.code ?? ""}`.startsWith("VPN_DATA_PLANE_");
+}
+
+function createDataPlaneFailure(dataPlane, dataPlaneProbeRevision) {
+  const error = new Error(`VPN data-plane probe failed for ${dataPlane?.target ?? "the configured target"}`);
+  error.code = dataPlane?.code ?? "VPN_DATA_PLANE_UNREACHABLE";
+  error.dataPlane = dataPlane;
+  error.dataPlaneProbeRevision = dataPlaneProbeRevision;
+  return error;
+}
+
+function getDataPlaneProbeConfig(config = {}) {
+  return {
+    vpn: {
+      dataPlaneProbeTarget: `${config?.vpn?.dataPlaneProbeTarget ?? ""}`.trim(),
+      dataPlaneProbeTimeoutMs: config?.vpn?.dataPlaneProbeTimeoutMs,
+    },
+  };
+}
+
 function isOperationResultOk(value) {
   if (!value || typeof value !== "object") {
     return true;
@@ -332,6 +360,7 @@ export class VpnMaintainer {
     this.ensureOnlineFn = options.ensureOnlineFn ?? ensureOnline;
     this.maintainOnlineFn = options.maintainOnlineFn ?? maintainOnline;
     this.repairOfficialUiFn = options.repairOfficialUiFn ?? null;
+    this.dataPlaneProbeFn = options.dataPlaneProbeFn ?? null;
     this.actionRunner =
       options.actionRunner ?? ((_key, operation) => Promise.resolve().then(operation));
     this.nowFn = options.nowFn ?? (() => Date.now());
@@ -340,10 +369,14 @@ export class VpnMaintainer {
     this.controller = null;
     this.activeRun = null;
     this.activeCyclePromise = null;
+    this.activeCycleMetadata = null;
     this.startPromise = null;
     this.stopPromise = null;
     this.execution = null;
     this.lastOfficialUiRepair = null;
+    this.dataPlaneProbeConfig = getDataPlaneProbeConfig();
+    this.dataPlaneProbeRevision = 0;
+    this.dataPlaneProbeDescriptor = describeVpnDataPlaneProbe(this.dataPlaneProbeConfig, "pending");
     this.state = {
       running: false,
       draining: false,
@@ -359,11 +392,69 @@ export class VpnMaintainer {
       lastEventAt: null,
       lastEvent: null,
       lastError: null,
+      dataPlaneProbe: cloneState(this.dataPlaneProbeDescriptor),
+      dataPlaneProbeRevision: this.dataPlaneProbeRevision,
+      dataPlaneObservation: null,
     };
   }
 
   getStatus() {
     return cloneState(this.state);
+  }
+
+  updateDataPlaneProbeConfig(config = {}) {
+    const nextConfig = getDataPlaneProbeConfig(config);
+    const targetChanged =
+      nextConfig.vpn.dataPlaneProbeTarget !== this.dataPlaneProbeConfig.vpn.dataPlaneProbeTarget;
+    this.dataPlaneProbeConfig = nextConfig;
+    this.dataPlaneProbeDescriptor = describeVpnDataPlaneProbe(nextConfig, "pending");
+    if (targetChanged) {
+      this.dataPlaneProbeRevision += 1;
+      this.state.lastEventAt = null;
+      this.state.lastEvent = null;
+      this.state.lastError = null;
+      this.state.dataPlaneObservation = null;
+    }
+    this.state.dataPlaneProbe = cloneState(this.dataPlaneProbeDescriptor);
+    this.state.dataPlaneProbeRevision = this.dataPlaneProbeRevision;
+  }
+
+  recordDataPlaneObservation(dataPlane, options = {}) {
+    if (!dataPlane || typeof dataPlane !== "object") {
+      return false;
+    }
+
+    const observationConfig = options.config
+      ? getDataPlaneProbeConfig(options.config)
+      : this.dataPlaneProbeConfig;
+    if (
+      observationConfig.vpn.dataPlaneProbeTarget !==
+      this.dataPlaneProbeConfig.vpn.dataPlaneProbeTarget
+    ) {
+      return false;
+    }
+
+    const expectedProbe = this.dataPlaneProbeDescriptor;
+    const targetMatches =
+      Boolean(expectedProbe.configured) === Boolean(dataPlane.configured) &&
+      (expectedProbe.configured !== true || expectedProbe.target === dataPlane.target);
+    if (!targetMatches) {
+      return false;
+    }
+
+    const status = options.status ?? {};
+    this.state.dataPlaneObservation = {
+      observedAt: getDataPlaneObservedAt(dataPlane, this.nowFn()),
+      dataPlaneProbeRevision: this.dataPlaneProbeRevision,
+      activeSession: status.activeSession?.sessionId
+        ? { sessionId: status.activeSession.sessionId }
+        : null,
+      loginStatus: status.loginStatus?.status != null
+        ? { status: status.loginStatus.status }
+        : null,
+      dataPlane: cloneState(dataPlane),
+    };
+    return true;
   }
 
   async writeEvent(event, payload = {}) {
@@ -509,6 +600,7 @@ export class VpnMaintainer {
       throw new Error("VpnMaintainer requires vpn username and password");
     }
 
+    this.updateDataPlaneProbeConfig(config);
     const runtime = this.runtimeFactory(config);
     const officialAutoConnectGuard = await this.actionRunner("maintainer-initialize", () =>
       this.disableOfficialAutoConnect(runtime, config),
@@ -535,12 +627,18 @@ export class VpnMaintainer {
     const cycleTimeoutMs = getMaintainerCycleTimeoutMs(config, options);
     const controller = new AbortController();
     const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const ensureOnlineAcrossGateways = async (maintainOptions) => {
+    const ensureOnlineAcrossGateways = async (maintainOptions = {}) => {
+      const cycleSignal = maintainOptions.signal ?? controller.signal;
       const quietHours = getQuietHoursState(config, this.nowFn());
       if (quietHours.active) {
         return buildQuietHoursPausedResult(quietHours);
       }
 
+      const cycleMetadata = {
+        dataPlaneProbeConfig: this.dataPlaneProbeConfig,
+        dataPlaneProbeRevision: this.dataPlaneProbeRevision,
+      };
+      this.activeCycleMetadata = cycleMetadata;
       let cyclePromise = null;
       try {
         cyclePromise = this.actionRunner("maintainer-cycle", async () => {
@@ -551,6 +649,7 @@ export class VpnMaintainer {
             try {
               const result = await this.ensureOnlineFn({
                 ...maintainOptions,
+                signal: cycleSignal,
                 runtime,
                 gatewayLogin: this.gatewayLoginFactory(gatewayCandidate),
                 gatewayHost: gatewayCandidate.host,
@@ -575,6 +674,24 @@ export class VpnMaintainer {
                   });
                 },
               });
+              const dataPlaneResult = this.dataPlaneProbeFn
+                ? await this.dataPlaneProbeFn(cycleMetadata.dataPlaneProbeConfig, {
+                    signal: cycleSignal,
+                  })
+                : {
+                    configured: false,
+                    ok: null,
+                    state: "unconfigured",
+                    target: null,
+                  };
+              const dataPlane = {
+                ...dataPlaneResult,
+                observedAt: getDataPlaneObservedAt(dataPlaneResult, this.nowFn()),
+              };
+              const dataPlaneProbeRevision = cycleMetadata.dataPlaneProbeRevision;
+              if (dataPlane.configured && dataPlane.ok !== true) {
+                throw createDataPlaneFailure(dataPlane, dataPlaneProbeRevision);
+              }
               const officialUiRepair = await this.repairOfficialUiAfterOnline(config, gatewayCandidate, result);
               const usedGateway = result.action !== "already-online";
 
@@ -588,6 +705,8 @@ export class VpnMaintainer {
                   },
                 ],
                 ...result,
+                dataPlane,
+                dataPlaneProbeRevision,
                 ...(officialUiRepair ? { officialUiRepair } : {}),
               };
             } catch (error) {
@@ -603,13 +722,23 @@ export class VpnMaintainer {
               if (error?.diagnostics) {
                 attempt.diagnostics = error.diagnostics;
               }
+              if (error?.dataPlane) {
+                attempt.dataPlane = error.dataPlane;
+              }
+              if (Number.isInteger(error?.dataPlaneProbeRevision)) {
+                attempt.dataPlaneProbeRevision = error.dataPlaneProbeRevision;
+              }
               if (error?.code === "EASYCONNECT_PRIVATE_KICK") {
                 const privateKickCleanup = await this.cleanupOfficialUiAfterPrivateKick(runtime, config);
                 attempt.privateKickCleanup = privateKickCleanup;
                 error.privateKickCleanup = privateKickCleanup;
               }
               gatewayAttempts.push(attempt);
-              if (isRecoveryInfrastructureReadinessFailure(error)) {
+              if (controller.signal.aborted && error?.name === "AbortError") {
+                error.gatewayAttempts = gatewayAttempts;
+                throw error;
+              }
+              if (isRecoveryInfrastructureReadinessFailure(error) || isDataPlaneFailure(error)) {
                 error.gatewayAttempts = gatewayAttempts;
                 throw error;
               }
@@ -635,6 +764,9 @@ export class VpnMaintainer {
         if (this.activeCyclePromise === cyclePromise) {
           this.activeCyclePromise = null;
         }
+        if (this.activeCycleMetadata === cycleMetadata) {
+          this.activeCycleMetadata = null;
+        }
       }
     };
 
@@ -659,6 +791,9 @@ export class VpnMaintainer {
       lastEventAt: null,
       lastEvent: null,
       lastError: null,
+      dataPlaneProbe: cloneState(this.dataPlaneProbeDescriptor),
+      dataPlaneProbeRevision: this.dataPlaneProbeRevision,
+      dataPlaneObservation: null,
       officialAutoConnectGuard,
     };
 
@@ -685,14 +820,71 @@ export class VpnMaintainer {
           return;
         }
 
+        if (
+          !event.ok &&
+          event.error?.code === "MAINTAINER_CYCLE_TIMEOUT" &&
+          !Number.isInteger(event.error?.dataPlaneProbeRevision) &&
+          Number.isInteger(this.activeCycleMetadata?.dataPlaneProbeRevision)
+        ) {
+          event.error.dataPlaneProbeRevision = this.activeCycleMetadata.dataPlaneProbeRevision;
+        }
+        const eventDataPlaneProbeRevision = event.ok
+          ? event.result?.dataPlaneProbeRevision
+          : event.error?.dataPlaneProbeRevision;
+        const drainingCycle =
+          !event.ok &&
+          event.error?.code === "MAINTAINER_CYCLE_TIMEOUT" &&
+          this.activeCyclePromise;
+
+        const isStaleDataPlaneCycle = () =>
+          Number.isInteger(eventDataPlaneProbeRevision) &&
+          eventDataPlaneProbeRevision !== this.dataPlaneProbeRevision;
+        const ignoreStaleDataPlaneCycle = async () => {
+          this.state.currentPhase = null;
+          this.state.phaseUpdatedAt = null;
+          await this.writeEvent("maintainer-cycle-stale-data-plane", {
+            runId,
+            ignoredProbeRevision: eventDataPlaneProbeRevision,
+            currentProbeRevision: this.dataPlaneProbeRevision,
+          });
+          if (drainingCycle) {
+            try {
+              await drainingCycle;
+            } catch {
+              // The obsolete cycle has no user-facing state to preserve.
+            }
+          }
+          return {
+            nextIntervalMs: Math.min(intervalSeconds * 1000, DATA_PLANE_FAILURE_RETRY_MAX_MS),
+          };
+        };
+
+        if (isStaleDataPlaneCycle()) {
+          return ignoreStaleDataPlaneCycle();
+        }
+
+        const cycleLastPhase = this.state.currentPhase;
+        const selectedGateway =
+          event.ok && event.result?.gateway?.host && event.result?.gateway?.port
+            ? event.result.gateway
+            : null;
+        if (selectedGateway) {
+          await this.onGatewaySelected(selectedGateway);
+        }
+        if (this.activeRun !== runId) {
+          return;
+        }
+
+        if (isStaleDataPlaneCycle()) {
+          return ignoreStaleDataPlaneCycle();
+        }
+
         this.state.cycleCount += 1;
         this.state.lastEventAt = new Date().toISOString();
-        const cycleLastPhase = this.state.currentPhase;
         this.state.currentPhase = null;
         this.state.phaseUpdatedAt = null;
-        if (event.ok && event.result?.gateway?.host && event.result?.gateway?.port) {
-          this.state.gateway = event.result.gateway;
-          await this.onGatewaySelected(event.result.gateway);
+        if (selectedGateway) {
+          this.state.gateway = selectedGateway;
         }
         this.state.lastEvent = event.ok
           ? {
@@ -707,12 +899,10 @@ export class VpnMaintainer {
               diagnostics: event.error?.diagnostics,
               privateKickCleanup: event.error?.privateKickCleanup,
               gatewayAttempts: event.error?.gatewayAttempts,
+              dataPlane: event.error?.dataPlane,
+              dataPlaneProbeRevision: event.error?.dataPlaneProbeRevision,
             };
         this.state.lastError = event.ok ? null : this.state.lastEvent.error;
-        const drainingCycle =
-          !event.ok &&
-          event.error?.code === "MAINTAINER_CYCLE_TIMEOUT" &&
-          this.activeCyclePromise;
         if (drainingCycle) {
           this.state.draining = true;
           this.state.drainingSince = new Date().toISOString();
@@ -740,6 +930,11 @@ export class VpnMaintainer {
         if (!event.ok && isRecoveryInfrastructureReadinessFailure(event.error)) {
           return {
             nextIntervalMs: Math.max(intervalSeconds * 1000, LOCAL_SERVICE_FAILURE_BACKOFF_MS),
+          };
+        }
+        if (!event.ok && isDataPlaneFailure(event.error)) {
+          return {
+            nextIntervalMs: Math.min(intervalSeconds * 1000, DATA_PLANE_FAILURE_RETRY_MAX_MS),
           };
         }
         if (event.ok && Number.isFinite(event.result?.nextIntervalMs) && event.result.nextIntervalMs > 0) {

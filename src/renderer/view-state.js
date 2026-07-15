@@ -1,4 +1,5 @@
 import { describeMaintainerEvent } from "../services/vpn-status-labels.js";
+import { resolveDataPlaneEvidence } from "../services/vpn-data-plane-evidence.js";
 import {
   sanitizeDiagnosticTextForDisplay,
   sanitizeDiagnosticValueForDisplay,
@@ -51,6 +52,40 @@ export function deriveConnectionView({ status = {}, environmentInfo = {}, mainta
   }
 
   if (status.loginStatus?.status === "1") {
+    if (status.dataPlane?.configured !== true) {
+      return {
+        tone: "warning",
+        label: "连接未验证",
+        title: "需要配置连接验证",
+        detail: "EasyConnect 控制面显示在线，但尚未配置内网探活目标。",
+        primaryAction: "open-settings",
+        primaryLabel: "配置探活目标",
+      };
+    }
+
+    if (status.dataPlane.ok == null) {
+      return {
+        tone: "warning",
+        label: "连接待复核",
+        title: "等待数据通道检查",
+        detail: "EasyConnect 控制面显示在线，等待下一轮内网探活或手动检查。",
+        primaryAction: "refresh",
+        primaryLabel: "立即检查",
+      };
+    }
+
+    if (status.dataPlane.ok !== true) {
+      const target = status.dataPlane.target ? `「${status.dataPlane.target}」` : "";
+      return {
+        tone: "warning",
+        label: "数据通道异常",
+        title: "内网连接不可达",
+        detail: `EasyConnect 控制面显示在线，但探活目标${target}当前不可达。`,
+        primaryAction: "refresh",
+        primaryLabel: "重新检查",
+      };
+    }
+
     return {
       tone: "online",
       label: "已连接",
@@ -122,6 +157,10 @@ export function deriveConnectionView({ status = {}, environmentInfo = {}, mainta
     primaryAction: "recover",
     primaryLabel: "立即连接",
   };
+}
+
+export function resolveDataPlaneForRender(status = {}, maintainerStatus = {}, options = {}) {
+  return resolveDataPlaneEvidence(status, maintainerStatus, options);
 }
 
 export function deriveMaintainerView({ config = {}, maintainerStatus = {} } = {}) {

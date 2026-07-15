@@ -3,11 +3,18 @@ import assert from "node:assert/strict";
 
 import { describeMaintainerEvent, extractStatusFromRecoverResult } from "../src/services/vpn-status-labels.js";
 
+const REACHABLE_DATA_PLANE = {
+  configured: true,
+  ok: true,
+  state: "reachable",
+};
+
 test("describeMaintainerEvent summarizes already-online cycles", () => {
   const summary = describeMaintainerEvent({
     ok: true,
     result: {
       action: "already-online",
+      dataPlane: REACHABLE_DATA_PLANE,
     },
   });
 
@@ -23,6 +30,7 @@ test("describeMaintainerEvent reports automatic official UI repair", () => {
     ok: true,
     result: {
       action: "already-online",
+      dataPlane: REACHABLE_DATA_PLANE,
       officialUiRepair: {
         action: "repair-official-ui",
       },
@@ -75,6 +83,7 @@ test("describeMaintainerEvent reports restored official service page", () => {
     ok: true,
     result: {
       action: "already-online",
+      dataPlane: REACHABLE_DATA_PLANE,
       officialUiRepair: {
         action: "restore-hidden-service-target",
       },
@@ -93,6 +102,7 @@ test("describeMaintainerEvent reports restored unreachable official UI", () => {
     ok: true,
     result: {
       action: "already-online",
+      dataPlane: REACHABLE_DATA_PLANE,
       officialUiRepair: {
         action: "restore-unreachable-official-ui",
       },
@@ -111,6 +121,7 @@ test("describeMaintainerEvent keeps VPN online when official UI restore is incom
     ok: true,
     result: {
       action: "already-online",
+      dataPlane: REACHABLE_DATA_PLANE,
       officialUiRepair: {
         action: "restore-missing-service-target-incomplete",
         reason: "final EasyConnect page still is not a usable service target",
@@ -130,6 +141,7 @@ test("describeMaintainerEvent keeps VPN online when official UI repair fails", (
     ok: true,
     result: {
       action: "already-online",
+      dataPlane: REACHABLE_DATA_PLANE,
       officialUiRepair: {
         action: "repair-error",
         error: "DevTools target is unreachable",
@@ -305,6 +317,64 @@ test("describeMaintainerEvent classifies all-gateway failures as offline", () =>
     detail: "两个已配置网关都恢复失败，请检查网络、网关地址或 EasyConnect 服务端状态。本轮尝试：203.0.113.10:9898 失败，198.51.100.20:9898 失败。",
     variant: "error",
   });
+});
+
+test("describeMaintainerEvent distinguishes a failed data-plane probe from gateway recovery", () => {
+  assert.deepEqual(
+    describeMaintainerEvent({
+      ok: false,
+      code: "VPN_DATA_PLANE_UNREACHABLE",
+      error: "VPN data-plane probe failed for tcp://192.168.150.199:1521",
+      dataPlane: {
+        configured: true,
+        ok: false,
+        target: "tcp://192.168.150.199:1521",
+      },
+    }),
+    {
+      title: "数据通道不可达",
+      detail: "EasyConnect 控制面显示在线，但内网探活目标 tcp://192.168.150.199:1521 当前不可达；守护将在 30 秒内重新检查。",
+      variant: "error",
+    },
+  );
+});
+
+test("describeMaintainerEvent does not describe an unconfigured control-plane session as healthy", () => {
+  assert.deepEqual(
+    describeMaintainerEvent({
+      ok: true,
+      result: {
+        action: "already-online",
+        dataPlane: { configured: false, ok: null, state: "unconfigured" },
+      },
+    }),
+    {
+      title: "连接未验证",
+      detail: "EasyConnect 控制面显示在线，但尚未配置内网探活目标。",
+      variant: "warn",
+    },
+  );
+});
+
+test("describeMaintainerEvent rejects a control-plane recovery with a failed data plane", () => {
+  assert.deepEqual(
+    describeMaintainerEvent({
+      ok: true,
+      result: {
+        action: "relogin-page-bridge",
+        dataPlane: {
+          configured: true,
+          ok: false,
+          target: "tcp://192.168.150.199:1521",
+        },
+      },
+    }),
+    {
+      title: "数据通道不可达",
+      detail: "EasyConnect 控制面显示在线，但内网探活目标 tcp://192.168.150.199:1521 当前不可达；请重新检查网络。",
+      variant: "error",
+    },
+  );
 });
 
 test("extractStatusFromRecoverResult returns the direct main-path status payload", () => {

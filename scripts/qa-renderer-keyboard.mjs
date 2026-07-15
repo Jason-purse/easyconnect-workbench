@@ -64,6 +64,7 @@ const WORKBENCH_STUB = String.raw`
         maintainerQuietHoursEnabled: false,
         maintainerQuietStart: "18:30",
         maintainerQuietEnd: "09:00",
+        dataPlaneProbeTarget: "tcp://192.0.2.10:443",
         appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
         gateways: [{ host: "203.0.113.10", port: 9898 }],
       },
@@ -72,6 +73,14 @@ const WORKBENCH_STUB = String.raw`
       loginStatus: { status: "1" },
       activeSession: { sessionId: "keyboard-qa-session" },
       serviceState: { base: 18, l3vpn: 18, tcp: 43 },
+      dataPlane: {
+        configured: true,
+        ok: true,
+        state: "reachable",
+        target: "tcp://192.0.2.10:443",
+        durationMs: 18,
+        route: { interface: "utun5", tunneled: true },
+      },
       officialUi: {
         reachable: true,
         primaryKind: "service",

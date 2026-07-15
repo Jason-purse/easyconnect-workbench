@@ -15,6 +15,8 @@ const DEFAULT_CONFIG = {
     maintainerQuietHoursEnabled: true,
     maintainerQuietStart: "18:30",
     maintainerQuietEnd: "09:00",
+    dataPlaneProbeTarget: "",
+    dataPlaneProbeTimeoutMs: 5000,
     lastKnownGateway: null,
     appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
     gateways: [],
@@ -75,6 +77,10 @@ function mergeConfig(base, incoming) {
       ),
       maintainerQuietStart: `${incoming?.vpn?.maintainerQuietStart ?? base.vpn.maintainerQuietStart ?? "18:30"}`.trim() || "18:30",
       maintainerQuietEnd: `${incoming?.vpn?.maintainerQuietEnd ?? base.vpn.maintainerQuietEnd ?? "09:00"}`.trim() || "09:00",
+      dataPlaneProbeTarget: `${incoming?.vpn?.dataPlaneProbeTarget ?? base.vpn.dataPlaneProbeTarget ?? ""}`.trim(),
+      dataPlaneProbeTimeoutMs:
+        Number.parseInt(`${incoming?.vpn?.dataPlaneProbeTimeoutMs ?? base.vpn.dataPlaneProbeTimeoutMs ?? 5000}`, 10) ||
+        5000,
       lastKnownGateway: normalizeGateway(
         shouldPreserveLearnedGateways
           ? base.vpn.lastKnownGateway
@@ -93,9 +99,10 @@ function cloneConfig(value) {
 export class ConfigStore {
   constructor(userDataPath) {
     this.filePath = path.join(userDataPath, "config.json");
+    this.writeQueue = Promise.resolve();
   }
 
-  async load() {
+  async loadFromDisk() {
     try {
       const raw = await readFile(this.filePath, "utf8");
       return mergeConfig(DEFAULT_CONFIG, JSON.parse(raw));
@@ -104,12 +111,50 @@ export class ConfigStore {
     }
   }
 
-  async save(nextConfig) {
-    const current = await this.load();
-    const merged = mergeConfig(current, nextConfig);
+  async persist(config) {
     await mkdir(path.dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, JSON.stringify(merged, null, 2), "utf8");
-    return merged;
+    await writeFile(this.filePath, JSON.stringify(config, null, 2), "utf8");
+  }
+
+  enqueueWrite(operation) {
+    const pending = this.writeQueue.then(operation, operation);
+    this.writeQueue = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
+  }
+
+  async load() {
+    await this.writeQueue;
+    return this.loadFromDisk();
+  }
+
+  save(nextConfig) {
+    return this.enqueueWrite(async () => {
+      const current = await this.loadFromDisk();
+      const merged = mergeConfig(current, nextConfig);
+      await this.persist(merged);
+      return merged;
+    });
+  }
+
+  update(updater) {
+    if (typeof updater !== "function") {
+      throw new TypeError("ConfigStore.update requires an updater function");
+    }
+
+    return this.enqueueWrite(async () => {
+      const current = await this.loadFromDisk();
+      const nextConfig = await updater(current);
+      if (nextConfig === current) {
+        return current;
+      }
+
+      const merged = mergeConfig(current, nextConfig);
+      await this.persist(merged);
+      return merged;
+    });
   }
 }
 

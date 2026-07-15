@@ -11,6 +11,7 @@ import { access } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildOfficialUiState } from "./official-ui-state.js";
+import { describeVpnDataPlaneProbe, probeVpnDataPlane } from "./vpn-data-plane-probe.js";
 import { buildRecoveryPlan, collectRecoveryGateways } from "./vpn-gateway-pool.js";
 
 const OFFICIAL_UI_PROBE_EXPRESSION = `(() => ({
@@ -1334,6 +1335,7 @@ export class VpnService {
           port: gateway.port,
         }));
     this.ensureOnlineFn = options.ensureOnlineFn ?? ensureOnline;
+    this.dataPlaneProbeFn = options.dataPlaneProbeFn ?? probeVpnDataPlane;
     this.delayFn =
       options.delayFn ??
       ((ms) => new Promise((resolve) => {
@@ -1355,9 +1357,14 @@ export class VpnService {
     return this.runtimeFactory(config);
   }
 
+  async probeDataPlane(config = {}, options = {}) {
+    return this.dataPlaneProbeFn(config, options);
+  }
+
   async getSnapshot(config = {}, options = {}) {
     const runtime = this.createRuntime(config);
     const includeOfficialUi = options.includeOfficialUi ?? true;
+    const includeDataPlane = options.includeDataPlane ?? true;
     const remoteDebugPort = getRemoteDebugPort(config);
     const activeSession = await runtime.describeActiveSession();
 
@@ -1392,6 +1399,12 @@ export class VpnService {
           serviceState: null,
           localRuntimeInfo: null,
         };
+
+    if (includeDataPlane) {
+      status.dataPlane = status.loginStatus?.status === "1"
+        ? await this.probeDataPlane(config, { signal: options.signal })
+        : describeVpnDataPlaneProbe(config, "control-plane-offline");
+    }
 
     const latestCachedTokenPromise = activeSession?.token
       ? Promise.resolve(null)
@@ -1436,7 +1449,10 @@ export class VpnService {
   }
 
   async getEnvironmentInfo(config = {}) {
-    const snapshot = await this.getSnapshot(config, { includeOfficialUi: false });
+    const snapshot = await this.getSnapshot(config, {
+      includeOfficialUi: false,
+      includeDataPlane: false,
+    });
     return snapshot.environmentInfo;
   }
 
@@ -1498,7 +1514,7 @@ export class VpnService {
     const onlineAction = options.onlineAction ?? null;
     const postRepairSettleMs = getOfficialUiPostRepairSettleMs(config, options);
     const postRepairSettleState = { used: false };
-    const statusSnapshot = await this.getSnapshot(config);
+    const statusSnapshot = await this.getSnapshot(config, { includeDataPlane: false });
     const status = statusSnapshot.status;
 
     const statusIsOnline =
@@ -2231,6 +2247,10 @@ export class VpnService {
 
   async recoverAndLogin(config = {}, username, password, remoteDebugPort, gatewayCandidates = []) {
     const runtime = this.createRuntime(config);
+    const withDataPlaneProbe = async (result) => ({
+      ...result,
+      dataPlane: await this.probeDataPlane(config),
+    });
     let gateways = collectRecoveryGateways(config, gatewayCandidates, []);
     if (gateways.length === 0) {
       gateways = collectRecoveryGateways(config, gatewayCandidates, await runtime.getGatewayCandidates());
@@ -2252,13 +2272,13 @@ export class VpnService {
         fallback.online.activeSession = sanitizeSession(fallback.online.activeSession);
       }
 
-      return {
+      return withDataPlaneProbe({
         mode: "fallback-portal-debug",
         gateway: lastGateway,
         gatewayAttempts,
         error: error?.message ?? String(error),
         ...fallback,
-      };
+      });
     };
 
     const tryPageBridgeFallback = async (error) => {
@@ -2275,13 +2295,13 @@ export class VpnService {
         fallback.online.activeSession = sanitizeSession(fallback.online.activeSession);
       }
 
-      return {
+      return withDataPlaneProbe({
         mode: "fallback-page-bridge",
         gateway: lastGateway,
         gatewayAttempts,
         error: error?.message ?? String(error),
         ...fallback,
-      };
+      });
     };
 
     let lastError = new Error("No gateway available for recoverAndLogin");
@@ -2299,7 +2319,7 @@ export class VpnService {
           remoteDebugPort,
         });
 
-        return {
+        return withDataPlaneProbe({
           gateway,
           gatewayAttempts: [
             ...gatewayAttempts,
@@ -2309,7 +2329,7 @@ export class VpnService {
             },
           ],
           ...sanitizeEnsureOnlineResult(result),
-        };
+        });
       } catch (error) {
         gatewayAttempts.push({
           gateway: `${gateway.host}:${gateway.port}`,

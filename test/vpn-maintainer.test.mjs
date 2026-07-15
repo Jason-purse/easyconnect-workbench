@@ -515,6 +515,578 @@ test("VpnMaintainer resumes automatic keepalive at quiet-hours end", async () =>
   await manager.stop();
 });
 
+test("VpnMaintainer records a data-plane failure and retries within 30 seconds without repairing the UI", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  let finishLoop = null;
+  let cycleControl = null;
+  let repairCalls = 0;
+  let ensureCalls = 0;
+
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => {
+      ensureCalls += 1;
+      return {
+        action: "already-online",
+        activeSession: { sessionId: "session-1" },
+        loginStatus: { status: "1" },
+      };
+    },
+    dataPlaneProbeFn: async () => ({
+      configured: true,
+      ok: false,
+      state: "unreachable",
+      code: "VPN_DATA_PLANE_UNREACHABLE",
+      target: "tcp://192.168.150.199:1521",
+    }),
+    repairOfficialUiFn: async () => {
+      repairCalls += 1;
+      return { action: "already-consistent" };
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle }) => {
+      try {
+        await ensureOnlineFn({});
+        assert.fail("the failed data-plane probe must fail the cycle");
+      } catch (error) {
+        cycleControl = await onCycle({ ok: false, error });
+      }
+      return new Promise((resolve) => {
+        finishLoop = resolve;
+      });
+    },
+  });
+
+  await manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [
+        { host: "198.51.100.20", port: 9898 },
+        { host: "203.0.113.10", port: 9898 },
+      ],
+      maintainerIntervalSeconds: 300,
+      dataPlaneProbeTarget: "tcp://192.168.150.199:1521",
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const status = manager.getStatus();
+  assert.equal(ensureCalls, 1);
+  assert.equal(repairCalls, 0);
+  assert.equal(status.lastEvent.ok, false);
+  assert.equal(status.lastEvent.code, "VPN_DATA_PLANE_UNREACHABLE");
+  assert.equal(status.lastEvent.dataPlane.target, "tcp://192.168.150.199:1521");
+  assert.deepEqual(cycleControl, { nextIntervalMs: 30000 });
+
+  finishLoop();
+  await manager.stop();
+});
+
+test("VpnMaintainer attaches a successful data-plane probe to the cycle result", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  let finishLoop = null;
+  let probeSignal = null;
+  const dataPlane = {
+    configured: true,
+    ok: true,
+    state: "reachable",
+    target: "tcp://192.168.150.199:1521",
+  };
+  const manager = new VpnMaintainer({
+    nowFn: () => Date.parse("2026-07-15T09:00:02.000Z"),
+    runtimeFactory: () => ({
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => ({
+      action: "already-online",
+      activeSession: { sessionId: "session-1" },
+      loginStatus: { status: "1" },
+    }),
+    dataPlaneProbeFn: async (_config, options) => {
+      probeSignal = options?.signal ?? null;
+      return dataPlane;
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle }) => {
+      const result = await ensureOnlineFn({});
+      await onCycle({ ok: true, result });
+      return new Promise((resolve) => {
+        finishLoop = resolve;
+      });
+    },
+  });
+
+  await manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+      dataPlaneProbeTarget: dataPlane.target,
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(manager.getStatus().lastEvent.result.dataPlane, {
+    ...dataPlane,
+    observedAt: "2026-07-15T09:00:02.000Z",
+  });
+  assert.equal(probeSignal instanceof AbortSignal, true);
+
+  finishLoop();
+  await manager.stop();
+});
+
+test("VpnMaintainer aborts an in-flight data-plane probe during stop", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const probeEntered = createDeferred();
+  let probeAborted = false;
+  let ensureCalls = 0;
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({}),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => {
+      ensureCalls += 1;
+      return {
+        action: "already-online",
+        activeSession: { sessionId: "session-1" },
+        loginStatus: { status: "1" },
+      };
+    },
+    dataPlaneProbeFn: async (_config, { signal }) => new Promise((_resolve, reject) => {
+      probeEntered.resolve();
+      const abort = () => {
+        probeAborted = true;
+        const error = new Error("probe aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+      if (signal.aborted) {
+        abort();
+      } else {
+        signal.addEventListener("abort", abort, { once: true });
+      }
+    }),
+  });
+
+  await manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [
+        { host: "198.51.100.20", port: 9898 },
+        { host: "203.0.113.10", port: 9898 },
+      ],
+      dataPlaneProbeTarget: "tcp://192.0.2.10:1521",
+    },
+  });
+  await probeEntered.promise;
+  const status = await manager.stop();
+
+  assert.equal(probeAborted, true);
+  assert.equal(ensureCalls, 1);
+  assert.equal(status.running, false);
+  assert.equal(status.lastEvent, null);
+});
+
+test("VpnMaintainer uses saved data-plane probe settings on the next running cycle", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const firstProbe = createDeferred();
+  const runSecondCycle = createDeferred();
+  const secondProbe = createDeferred();
+  const probeSettings = [];
+  let finishLoop = null;
+
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => ({
+      action: "already-online",
+      activeSession: { sessionId: "session-1" },
+      loginStatus: { status: "1" },
+    }),
+    dataPlaneProbeFn: async (config) => {
+      const target = config.vpn.dataPlaneProbeTarget;
+      probeSettings.push([target, config.vpn.dataPlaneProbeTimeoutMs]);
+      const result = { configured: true, ok: true, state: "reachable", target };
+      if (probeSettings.length === 1) {
+        firstProbe.resolve();
+      } else {
+        secondProbe.resolve();
+      }
+      return result;
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle, signal }) => {
+      await onCycle({ ok: true, result: await ensureOnlineFn({ signal }) });
+      await runSecondCycle.promise;
+      await onCycle({ ok: true, result: await ensureOnlineFn({ signal }) });
+      return new Promise((resolve) => {
+        finishLoop = resolve;
+      });
+    },
+  });
+
+  await manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+      dataPlaneProbeTarget: "tcp://192.0.2.10:1521",
+      dataPlaneProbeTimeoutMs: 2400,
+    },
+  });
+  await firstProbe.promise;
+
+  assert.equal(manager.getStatus().lastEvent.result.dataPlane.target, "tcp://192.0.2.10:1521");
+
+  manager.updateDataPlaneProbeConfig({
+    vpn: {
+      dataPlaneProbeTarget: "tcp://192.0.2.11:1521",
+      dataPlaneProbeTimeoutMs: 3600,
+    },
+  });
+  const updatedStatus = manager.getStatus();
+  assert.equal(updatedStatus.lastEvent, null);
+  assert.equal(updatedStatus.lastEventAt, null);
+  assert.deepEqual(updatedStatus.dataPlaneProbe, {
+    configured: true,
+    ok: null,
+    state: "pending",
+    target: "tcp://192.0.2.11:1521",
+  });
+  runSecondCycle.resolve();
+  await secondProbe.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(probeSettings, [
+    ["tcp://192.0.2.10:1521", 2400],
+    ["tcp://192.0.2.11:1521", 3600],
+  ]);
+
+  finishLoop();
+  await manager.stop();
+});
+
+test("VpnMaintainer ignores an old probe cycle that finishes after the target changes", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const probeEntered = createDeferred();
+  const releaseProbe = createDeferred();
+  let finishLoop = null;
+  const oldTarget = "tcp://192.0.2.10:1521";
+  const newTarget = "tcp://192.0.2.11:1521";
+
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => ({
+      action: "already-online",
+      activeSession: { sessionId: "session-1" },
+      loginStatus: { status: "1" },
+    }),
+    dataPlaneProbeFn: async (config) => {
+      const target = config.vpn.dataPlaneProbeTarget;
+      probeEntered.resolve();
+      await releaseProbe.promise;
+      return { configured: true, ok: true, state: "reachable", target };
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle, signal }) => {
+      await onCycle({ ok: true, result: await ensureOnlineFn({ signal }) });
+      return new Promise((resolve) => {
+        finishLoop = resolve;
+      });
+    },
+  });
+
+  const started = manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+      dataPlaneProbeTarget: oldTarget,
+    },
+  });
+  await probeEntered.promise;
+  manager.updateDataPlaneProbeConfig({ vpn: { dataPlaneProbeTarget: newTarget } });
+  releaseProbe.resolve();
+  await started;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const status = manager.getStatus();
+  assert.equal(status.dataPlaneProbe.target, newTarget);
+  assert.equal(status.cycleCount, 0);
+  assert.equal(status.lastEventAt, null);
+  assert.equal(status.lastEvent, null);
+
+  finishLoop();
+  await manager.stop();
+});
+
+test("VpnMaintainer ignores a completed old cycle when the probe target changes during gateway persistence", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const runCycle = createDeferred();
+  const gatewayPersistenceEntered = createDeferred();
+  const releaseGatewayPersistence = createDeferred();
+  const cycleHandled = createDeferred();
+  const oldTarget = "tcp://192.0.2.10:1521";
+  const newTarget = "tcp://192.0.2.11:1521";
+
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({
+      async disableOfficialAutoConnectBeforeLaunch() {
+        return { ok: true, action: "disabled" };
+      },
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => ({
+      action: "relogin-page-bridge",
+      activeSession: { sessionId: "session-1" },
+      loginStatus: { status: "1" },
+    }),
+    dataPlaneProbeFn: async (config) => ({
+      configured: true,
+      ok: true,
+      state: "reachable",
+      target: config.vpn.dataPlaneProbeTarget,
+    }),
+    onGatewaySelected: async () => {
+      gatewayPersistenceEntered.resolve();
+      await releaseGatewayPersistence.promise;
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle, signal }) => {
+      await runCycle.promise;
+      const result = await ensureOnlineFn({ signal });
+      await onCycle({ ok: true, result });
+      cycleHandled.resolve();
+      await new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", resolve, { once: true });
+      });
+    },
+  });
+
+  try {
+    await manager.start({
+      vpn: {
+        username: "demo-user",
+        password: "secret",
+        gateways: [{ host: "198.51.100.20", port: 9898 }],
+        dataPlaneProbeTarget: oldTarget,
+      },
+    });
+    runCycle.resolve();
+    await gatewayPersistenceEntered.promise;
+
+    manager.updateDataPlaneProbeConfig({ vpn: { dataPlaneProbeTarget: newTarget } });
+    releaseGatewayPersistence.resolve();
+    await cycleHandled.promise;
+
+    const status = manager.getStatus();
+    assert.equal(status.dataPlaneProbe.target, newTarget);
+    assert.equal(status.cycleCount, 0);
+    assert.equal(status.lastEventAt, null);
+    assert.equal(status.lastEvent, null);
+  } finally {
+    runCycle.resolve();
+    releaseGatewayPersistence.resolve();
+    await manager.stop();
+  }
+});
+
+test("VpnMaintainer commits cycle state atomically with the final probe revision check", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const runCycle = createDeferred();
+  const gatewayPersistenceEntered = createDeferred();
+  const releaseGatewayPersistence = createDeferred();
+  const targetUpdated = createDeferred();
+  const cycleHandled = createDeferred();
+  const oldTarget = "tcp://192.0.2.10:1521";
+  const newTarget = "tcp://192.0.2.11:1521";
+
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({
+      async disableOfficialAutoConnectBeforeLaunch() {
+        return { ok: true, action: "disabled" };
+      },
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => ({
+      action: "relogin-page-bridge",
+      activeSession: { sessionId: "session-1" },
+      loginStatus: { status: "1" },
+    }),
+    dataPlaneProbeFn: async (config) => ({
+      configured: true,
+      ok: true,
+      state: "reachable",
+      target: config.vpn.dataPlaneProbeTarget,
+    }),
+    onGatewaySelected: async () => {
+      gatewayPersistenceEntered.resolve();
+      await releaseGatewayPersistence.promise;
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          manager.updateDataPlaneProbeConfig({ vpn: { dataPlaneProbeTarget: newTarget } });
+          targetUpdated.resolve();
+        });
+      });
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle, signal }) => {
+      await runCycle.promise;
+      await onCycle({ ok: true, result: await ensureOnlineFn({ signal }) });
+      cycleHandled.resolve();
+      await new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", resolve, { once: true });
+      });
+    },
+  });
+
+  try {
+    await manager.start({
+      vpn: {
+        username: "demo-user",
+        password: "secret",
+        gateways: [{ host: "198.51.100.20", port: 9898 }],
+        dataPlaneProbeTarget: oldTarget,
+      },
+    });
+    runCycle.resolve();
+    await gatewayPersistenceEntered.promise;
+    releaseGatewayPersistence.resolve();
+    await Promise.all([targetUpdated.promise, cycleHandled.promise]);
+
+    const status = manager.getStatus();
+    assert.equal(status.dataPlaneProbe.target, newTarget);
+    assert.equal(status.lastEventAt, null);
+    assert.equal(status.lastEvent, null);
+  } finally {
+    runCycle.resolve();
+    releaseGatewayPersistence.resolve();
+    await manager.stop();
+  }
+});
+
+test("VpnMaintainer ignores an old probe cycle timeout after the target changes", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const probeEntered = createDeferred();
+  const releaseProbe = createDeferred();
+  const emitTimeout = createDeferred();
+  const timeoutHandled = createDeferred();
+  const oldTarget = "tcp://192.0.2.10:1521";
+  const newTarget = "tcp://192.0.2.11:1521";
+
+  const manager = new VpnMaintainer({
+    runtimeFactory: () => ({
+      async getGatewayCandidates() {
+        return [];
+      },
+    }),
+    gatewayLoginFactory: ({ host, port }) => ({ host, port }),
+    ensureOnlineFn: async () => ({
+      action: "already-online",
+      activeSession: { sessionId: "session-1" },
+      loginStatus: { status: "1" },
+    }),
+    dataPlaneProbeFn: async (config) => {
+      const target = config.vpn.dataPlaneProbeTarget;
+      probeEntered.resolve();
+      await releaseProbe.promise;
+      return { configured: true, ok: true, state: "reachable", target };
+    },
+    maintainOnlineFn: async ({ ensureOnlineFn, onCycle, signal }) => {
+      const cyclePromise = ensureOnlineFn({ signal });
+      await probeEntered.promise;
+      await emitTimeout.promise;
+      const timeoutError = new Error("Maintainer cycle timed out");
+      timeoutError.code = "MAINTAINER_CYCLE_TIMEOUT";
+      const handled = onCycle({ ok: false, error: timeoutError });
+      releaseProbe.resolve();
+      await cyclePromise.catch(() => {});
+      await handled;
+      timeoutHandled.resolve();
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    },
+  });
+
+  await manager.start({
+    vpn: {
+      username: "demo-user",
+      password: "secret",
+      gateways: [{ host: "198.51.100.20", port: 9898 }],
+      dataPlaneProbeTarget: oldTarget,
+    },
+  });
+  await probeEntered.promise;
+  manager.updateDataPlaneProbeConfig({ vpn: { dataPlaneProbeTarget: newTarget } });
+  emitTimeout.resolve();
+  await timeoutHandled.promise;
+
+  const status = manager.getStatus();
+  assert.equal(status.dataPlaneProbe.target, newTarget);
+  assert.equal(status.cycleCount, 0);
+  assert.equal(status.lastEventAt, null);
+  assert.equal(status.lastEvent, null);
+
+  await manager.stop();
+});
+
+test("VpnMaintainer stores a current manual data-plane observation", async () => {
+  const { VpnMaintainer } = await loadVpnMaintainer();
+  const manager = new VpnMaintainer({
+    nowFn: () => Date.parse("2026-07-15T09:00:05.000Z"),
+  });
+  const config = { vpn: { dataPlaneProbeTarget: "tcp://192.0.2.10:1521" } };
+  manager.updateDataPlaneProbeConfig(config);
+
+  const recorded = manager.recordDataPlaneObservation(
+    {
+      configured: true,
+      ok: false,
+      state: "unreachable",
+      target: "tcp://192.0.2.10:1521",
+      code: "VPN_DATA_PLANE_UNREACHABLE",
+      observedAt: "2026-07-15T09:00:02.000Z",
+    },
+    {
+      config,
+      status: {
+        activeSession: { sessionId: "session-1" },
+        loginStatus: { status: "1" },
+      },
+    },
+  );
+
+  assert.equal(recorded, true);
+  assert.equal(manager.getStatus().dataPlaneObservation.observedAt, "2026-07-15T09:00:02.000Z");
+  assert.equal(manager.getStatus().dataPlaneObservation.dataPlane.ok, false);
+});
+
 test("VpnMaintainer repairs official UI after a successful online cycle", async () => {
   const { VpnMaintainer } = await loadVpnMaintainer();
 

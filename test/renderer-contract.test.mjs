@@ -20,6 +20,8 @@ const requiredIds = [
   "vpn-quiet-hours-enabled",
   "vpn-quiet-start",
   "vpn-quiet-end",
+  "vpn-data-plane-probe-target",
+  "metric-data-plane",
 ];
 
 test("renderer exposes the VPN-only status-center structure", async () => {
@@ -44,6 +46,24 @@ test("renderer behavior has no toast overlay or renderer-owned autostart", async
   assert.match(source, /sanitizeVpnStatusForDisplay/);
   assert.match(source, /deriveMaintainerActivity/);
   assert.match(source, /currentConnectionAction === null/);
+});
+
+test("automatic and post-recovery refreshes do not run an extra data-plane probe", async () => {
+  const rendererSource = await readFile("src/renderer/app.js", "utf8");
+  const mainSource = await readFile("src/main.js", "utf8");
+  const scheduledRefresh = rendererSource.match(
+    /function scheduleMaintainerRefresh[\s\S]*?\n}\n\nasync function withAction/,
+  )?.[0] ?? "";
+  const recovery = rendererSource.match(
+    /async function recoverAndLogin[\s\S]*?\n}\n\nasync function repairOfficialUi/,
+  )?.[0] ?? "";
+
+  assert.match(scheduledRefresh, /includeDataPlane:\s*false/);
+  assert.match(recovery, /includeDataPlane:\s*false/);
+  assert.match(recovery, /dataPlane:\s*result\.dataPlane/);
+  assert.match(mainSource, /includeDataPlane:\s*payload\.includeDataPlane !== false/);
+  assert.match(mainSource, /recordDataPlaneObservation\(snapshot\.status\.dataPlane/);
+  assert.match(mainSource, /recordDataPlaneObservation\(result\.dataPlane/);
 });
 
 test("settings drawer is modal and keeps save feedback inside the drawer", async () => {

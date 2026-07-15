@@ -19,6 +19,27 @@ export function formatSessionId(sessionId) {
   return `${value.slice(0, 4)}…${value.slice(-4)}`;
 }
 
+export function formatDataPlaneProbe(dataPlane = null) {
+  if (!dataPlane || dataPlane.configured !== true) {
+    return "未配置";
+  }
+  if (dataPlane.ok === true) {
+    const interfaceName = dataPlane.route?.interface ?? "VPN";
+    const duration = Number.isFinite(dataPlane.durationMs) ? ` / ${dataPlane.durationMs} ms` : "";
+    return `可达 / ${interfaceName}${duration}`;
+  }
+  if (dataPlane.state === "control-plane-offline") {
+    return "等待控制面在线";
+  }
+  if (dataPlane.state === "not-tunneled") {
+    return `未走 VPN / ${dataPlane.route?.interface ?? "未知接口"}`;
+  }
+  if (dataPlane.state === "unexpected-status") {
+    return `HTTP ${dataPlane.statusCode ?? "异常"}`;
+  }
+  return "不可达";
+}
+
 export function sanitizeDiagnosticTextForDisplay(value = "") {
   return `${value}`
     .replace(
@@ -35,6 +56,33 @@ export function sanitizeDiagnosticTextForDisplay(value = "") {
 
 function sanitizeDiagnosticText(value) {
   return value === null || value === undefined ? null : sanitizeDiagnosticTextForDisplay(value);
+}
+
+function sanitizeDataPlaneProbe(dataPlane = null) {
+  if (!dataPlane) {
+    return null;
+  }
+
+  return {
+    configured: Boolean(dataPlane.configured),
+    ok: dataPlane.ok ?? null,
+    state: dataPlane.state ?? null,
+    target: dataPlane.target ?? null,
+    protocol: dataPlane.protocol ?? null,
+    durationMs: dataPlane.durationMs ?? null,
+    ...(dataPlane.observedAt ? { observedAt: dataPlane.observedAt } : {}),
+    statusCode: dataPlane.statusCode ?? null,
+    code: dataPlane.code ?? null,
+    causeCode: dataPlane.causeCode ?? null,
+    error: sanitizeDiagnosticText(dataPlane.error),
+    route: dataPlane.route
+      ? {
+          interface: dataPlane.route.interface ?? null,
+          gateway: dataPlane.route.gateway ?? null,
+          tunneled: Boolean(dataPlane.route.tunneled),
+        }
+      : null,
+  };
 }
 
 function isSensitiveDiagnosticKey(key = "") {
@@ -77,6 +125,7 @@ export function sanitizeVpnStatusForDisplay(status = {}) {
           tcp: status.serviceState.tcp ?? null,
         }
       : null,
+    dataPlane: sanitizeDataPlaneProbe(status?.dataPlane),
     officialUi: officialUi
       ? {
           reachable: officialUi.reachable ?? null,
@@ -122,11 +171,13 @@ export function sanitizeMaintainerStatusForDisplay(status = {}) {
           error: sanitizeDiagnosticText(event.error),
           code: event.code ?? null,
           lastPhase: event.lastPhase ?? null,
+          dataPlane: sanitizeDataPlaneProbe(event.dataPlane),
           result: result
             ? {
                 action: result.action ?? null,
                 mode: result.mode ?? null,
                 gateway: normalizeGateway(result.gateway),
+                dataPlane: sanitizeDataPlaneProbe(result.dataPlane),
                 gatewayAttempts: Array.isArray(result.gatewayAttempts)
                   ? result.gatewayAttempts.map((attempt) => ({
                       gateway: attempt.gateway ?? null,

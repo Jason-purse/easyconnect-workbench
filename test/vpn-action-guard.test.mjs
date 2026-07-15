@@ -185,6 +185,9 @@ test("main process routes every mutating IPC and tray entry point through the VP
 
   const readonlySource = source.slice(source.indexOf('ipcMain.handle("vpn:snapshot"'), source.indexOf('ipcMain.handle("vpn:probe-recovery"'));
   assert.doesNotMatch(readonlySource, /runVpnAction/);
+  assert.match(readonlySource, /const config = await resolveConfig\(payload\)/);
+  const configSaveSource = source.slice(source.indexOf('ipcMain.handle("config:save"'), source.indexOf('ipcMain.handle("vpn:snapshot"'));
+  assert.match(configSaveSource, /vpnMaintainer\.updateDataPlaneProbeConfig\(saved\)/);
   for (const key of ["maintainer-start", "maintainer-stop"]) {
     assert.match(source, new RegExp(`runMaintainerAction\\([\\s\\S]{0,180}\\"${key}\\"`), key);
   }
@@ -192,4 +195,6 @@ test("main process routes every mutating IPC and tray entry point through the VP
   assert.match(source, /allowWith/);
   assert.match(source, /"maintainer-initialize":\s*\["maintainer-start"\]/);
   assert.match(source, /actionRunner:\s*runMaintainerAction/);
+  assert.match(source, /dataPlaneProbeFn:\s*\(config, options\)\s*=>\s*vpnService\.probeDataPlane\(config, options\)/);
+  assert.match(source, /onGatewaySelected:[\s\S]{0,240}configStore\.update/);
 });

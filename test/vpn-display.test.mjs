@@ -32,6 +32,16 @@ test("sanitizeVpnStatusForDisplay allowlists status fields and redacts session i
       tokenRedacted: "deri...oken",
     },
     serviceState: { base: 18, l3vpn: 18, tcp: 43, raw: "secret" },
+    dataPlane: {
+      configured: true,
+      ok: true,
+      state: "reachable",
+      target: "tcp://192.168.150.199:1521",
+      protocol: "tcp:",
+      durationMs: 12,
+      route: { interface: "utun5", gateway: "2.0.1.18", tunneled: true, raw: "secret" },
+      raw: "secret",
+    },
     latestCachedToken: { token: "cached-secret-token" },
     officialUi: {
       reachable: true,
@@ -50,6 +60,19 @@ test("sanitizeVpnStatusForDisplay allowlists status fields and redacts session i
   assert.deepEqual(sanitized.activeSession, { sessionId: "prev…7f2a" });
   assert.deepEqual(sanitized.loginStatus, { status: "1" });
   assert.deepEqual(sanitized.serviceState, { base: 18, l3vpn: 18, tcp: 43 });
+  assert.deepEqual(sanitized.dataPlane, {
+    configured: true,
+    ok: true,
+    state: "reachable",
+    target: "tcp://192.168.150.199:1521",
+    protocol: "tcp:",
+    durationMs: 12,
+    statusCode: null,
+    code: null,
+    causeCode: null,
+    error: null,
+    route: { interface: "utun5", gateway: "2.0.1.18", tunneled: true },
+  });
   assert.equal(sanitized.officialUi.primaryKind, "service");
   assert.equal(JSON.stringify(sanitized).includes("preview-session-7f2a"), false);
   assert.equal(JSON.stringify(sanitized).includes("secret"), false);

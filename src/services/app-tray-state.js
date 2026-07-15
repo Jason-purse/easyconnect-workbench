@@ -1,10 +1,9 @@
 import { describeMaintainerEvent } from "./vpn-status-labels.js";
 import { formatSessionId, sanitizeDiagnosticTextForDisplay } from "./vpn-display.js";
-
-function getEventResult(status = {}) {
-  const result = status?.lastEvent?.result ?? {};
-  return result.online ?? result;
-}
+import {
+  getMaintainerDataPlaneEvidence,
+  getMaintainerEventResult,
+} from "./vpn-data-plane-evidence.js";
 
 function formatGateway(gateway) {
   if (!gateway?.host || !gateway?.port) {
@@ -14,18 +13,28 @@ function formatGateway(gateway) {
   return `${gateway.host}:${gateway.port}`;
 }
 
-function getOnlineState(status = {}) {
-  const eventResult = getEventResult(status);
-  const activeSession = eventResult?.activeSession ?? null;
-  const loginStatus = eventResult?.loginStatus ?? null;
+function getOnlineState(status = {}, options = {}) {
+  const eventResult = getMaintainerEventResult(status);
+  const evidence = getMaintainerDataPlaneEvidence(status, options);
+  const activeSession = evidence.source ? evidence.activeSession : (eventResult?.activeSession ?? null);
+  const loginStatus = evidence.source ? evidence.loginStatus : (eventResult?.loginStatus ?? null);
+  const dataPlane = evidence.dataPlane;
+  const controlPlaneOnline = Boolean(activeSession?.sessionId && loginStatus?.status === "1");
+  const verified = Boolean(controlPlaneOnline && dataPlane?.configured === true && dataPlane?.ok === true);
 
   return {
-    online: Boolean(activeSession?.sessionId && loginStatus?.status === "1"),
+    online: Boolean(verified && evidence.evidenceFresh && evidence.evidenceMatchesProbe),
+    controlPlaneOnline,
+    dataPlane,
+    verified,
+    evidenceFresh: evidence.evidenceFresh,
+    evidenceMatchesProbe: evidence.evidenceMatchesProbe,
+    evidenceSource: evidence.source,
     sessionId: activeSession?.sessionId ?? null,
   };
 }
 
-export function buildTrayStatusLabels(status = null) {
+export function buildTrayStatusLabels(status = null, options = {}) {
   if (!status) {
     return {
       title: "EasyConnect: 未初始化",
@@ -41,10 +50,11 @@ export function buildTrayStatusLabels(status = null) {
     };
   }
 
-  const eventDescription = describeMaintainerEvent(status.lastEvent);
+  const onlineState = getOnlineState(status, options);
+  const selectedEvent = onlineState.evidenceSource === "observation" ? null : status.lastEvent;
+  const eventDescription = describeMaintainerEvent(selectedEvent);
   const eventDetail = sanitizeDiagnosticTextForDisplay(eventDescription.detail);
-  const eventResult = getEventResult(status);
-  const onlineState = getOnlineState(status);
+  const eventResult = selectedEvent ? getMaintainerEventResult(status) : {};
   const action = eventResult?.action ?? "-";
   const gateway = formatGateway(eventResult?.gateway ?? status.gateway);
   const session = formatSessionId(onlineState.sessionId);
@@ -78,6 +88,107 @@ export function buildTrayStatusLabels(status = null) {
       canStop: true,
       running: true,
       online: onlineState.online,
+    };
+  }
+
+  if (onlineState.verified && !status.running) {
+    return {
+      title: "EasyConnect: 守护已停止",
+      detail: "自动守护未运行，最近一次在线结果不再作为当前状态。",
+      variant: "idle",
+      gateway,
+      session,
+      action,
+      canStart: true,
+      canStop: false,
+      running: false,
+      online: false,
+    };
+  }
+
+  if (onlineState.dataPlane && !onlineState.evidenceMatchesProbe) {
+    return {
+      title: "EasyConnect: 连接待复核",
+      detail: "探活目标已更新，等待下一轮检查。",
+      variant: "warn",
+      gateway,
+      session,
+      action,
+      canStart: false,
+      canStop: true,
+      running: true,
+      online: false,
+    };
+  }
+
+  if (onlineState.verified && !onlineState.evidenceFresh) {
+    return {
+      title: "EasyConnect: 连接待复核",
+      detail: "最近一次数据通道探测已过期，等待下一轮检查。",
+      variant: "warn",
+      gateway,
+      session,
+      action,
+      canStart: false,
+      canStop: true,
+      running: true,
+      online: false,
+    };
+  }
+
+  if (onlineState.controlPlaneOnline && onlineState.dataPlane?.configured !== true) {
+    return {
+      title: "EasyConnect: 连接未验证",
+      detail: eventDetail || "尚未配置内网探活目标，当前连接无法验证。",
+      variant: "warn",
+      gateway,
+      session,
+      action,
+      canStart: !status.running,
+      canStop: Boolean(status.running),
+      running: Boolean(status.running),
+      online: false,
+    };
+  }
+
+  if (
+    onlineState.controlPlaneOnline &&
+    onlineState.evidenceMatchesProbe &&
+    onlineState.dataPlane?.configured === true &&
+    onlineState.dataPlane?.ok === false
+  ) {
+    return {
+      title: "EasyConnect: 数据通道不可达",
+      detail: sanitizeDiagnosticTextForDisplay(
+        onlineState.dataPlane.error ?? "最新一次内网探活失败。",
+      ),
+      variant: "error",
+      gateway,
+      session,
+      action,
+      canStart: !status.running,
+      canStop: Boolean(status.running),
+      running: Boolean(status.running),
+      online: false,
+    };
+  }
+
+  if (
+    onlineState.evidenceSource === "maintainer" &&
+    onlineState.evidenceMatchesProbe &&
+    `${status.lastEvent?.code ?? ""}`.startsWith("VPN_DATA_PLANE_")
+  ) {
+    return {
+      title: "EasyConnect: 数据通道不可达",
+      detail: eventDetail,
+      variant: "error",
+      gateway,
+      session,
+      action,
+      canStart: !status.running,
+      canStop: Boolean(status.running),
+      running: Boolean(status.running),
+      online: false,
     };
   }
 
@@ -152,8 +263,8 @@ export function buildTrayTooltip(status = null) {
     .join("\n");
 }
 
-export function buildTrayStatusSignature(status = null) {
-  const labels = buildTrayStatusLabels(status);
+export function buildTrayStatusSignature(status = null, options = {}) {
+  const labels = buildTrayStatusLabels(status, options);
   return JSON.stringify({
     title: labels.title,
     detail: labels.detail,

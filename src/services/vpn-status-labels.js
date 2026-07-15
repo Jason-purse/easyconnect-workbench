@@ -24,6 +24,22 @@ export function describeMaintainerEvent(event) {
   }
 
   if (event.ok) {
+    const dataPlane = event.result?.dataPlane;
+    if (dataPlane?.configured === true && dataPlane.ok !== true) {
+      return {
+        title: "数据通道不可达",
+        detail: `EasyConnect 控制面显示在线，但内网探活目标 ${dataPlane.target ?? "已配置目标"} 当前不可达；请重新检查网络。`,
+        variant: "error",
+      };
+    }
+    if (dataPlane?.configured === false) {
+      return {
+        title: "连接未验证",
+        detail: "EasyConnect 控制面显示在线，但尚未配置内网探活目标。",
+        variant: "warn",
+      };
+    }
+
     if (event.result?.mode === "fallback-page-bridge") {
       return {
         title: "桥接恢复成功",
@@ -125,6 +141,13 @@ export function describeMaintainerEvent(event) {
   }
 
   const error = `${event.error ?? ""}`;
+  if (`${event.code ?? ""}`.startsWith("VPN_DATA_PLANE_")) {
+    return {
+      title: "数据通道不可达",
+      detail: `EasyConnect 控制面显示在线，但内网探活目标 ${event.dataPlane?.target ?? "已配置目标"} 当前不可达；守护将在 30 秒内重新检查。`,
+      variant: "error",
+    };
+  }
   const isAgentProxyNotReady =
     event.code === "EASYCONNECT_AGENT_PROXY_NOT_READY" ||
     (Array.isArray(event.gatewayAttempts) && event.gatewayAttempts.some((item) => (

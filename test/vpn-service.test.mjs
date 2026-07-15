@@ -35,6 +35,12 @@ test("VpnService.getDebugTargets redacts remote-debug credentials at the service
 
 test("VpnService.getSnapshot reuses one runtime and returns combined status/info", async () => {
   const calls = [];
+  const dataPlaneProbe = {
+    configured: true,
+    ok: true,
+    state: "reachable",
+    target: "tcp://192.168.150.199:1521",
+  };
   const fakeRuntime = {
     async describeActiveSession() {
       calls.push("describeActiveSession");
@@ -83,21 +89,120 @@ test("VpnService.getSnapshot reuses one runtime and returns combined status/info
   const service = new VpnService({
     runtimeFactory: () => fakeRuntime,
     existsFn: async () => true,
+    dataPlaneProbeFn: async (config) => {
+      calls.push(["probeDataPlane", config.vpn.dataPlaneProbeTarget]);
+      return dataPlaneProbe;
+    },
   });
 
   const snapshot = await service.getSnapshot({
     vpn: {
       appExecutable: fakeRuntime.appExecutable,
+      dataPlaneProbeTarget: "tcp://192.168.150.199:1521",
     },
   });
 
   assert.equal(snapshot.status.activeSession.token, undefined);
   assert.equal(snapshot.environmentInfo.activeSession.token, undefined);
   assert.deepEqual(snapshot.status.loginStatus, { status: "1" });
+  assert.deepEqual(snapshot.status.dataPlane, dataPlaneProbe);
   assert.equal(snapshot.environmentInfo.latestCachedToken, null);
   assert.deepEqual(snapshot.environmentInfo.gatewayCandidates, [{ host: "203.0.113.10", port: 9898 }]);
   assert.equal(calls.filter((item) => item === "describeActiveSession").length, 1);
   assert.equal(calls.includes("describeLatestCachedToken"), false);
+});
+
+test("VpnService.getSnapshot skips data-plane network IO while the control plane is offline", async () => {
+  let probeCalls = 0;
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return {
+        token: "secret-token",
+        sessionId: "session-1",
+      };
+    },
+    async getLoginStatus() {
+      return { status: "3" };
+    },
+    async getServiceState() {
+      return { base: "0" };
+    },
+    async getLocalRuntimeInfo() {
+      return {};
+    },
+    async getBundleSettingPath() {
+      return null;
+    },
+    async getPort() {
+      return null;
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+    dataPlaneProbeFn: async () => {
+      probeCalls += 1;
+      return { configured: true, ok: true, state: "reachable" };
+    },
+  });
+
+  const snapshot = await service.getSnapshot({
+    vpn: {
+      dataPlaneProbeTarget: "tcp://192.168.150.199:1521",
+    },
+  });
+
+  assert.equal(probeCalls, 0);
+  assert.deepEqual(snapshot.status.dataPlane, {
+    configured: true,
+    ok: null,
+    state: "control-plane-offline",
+    target: "tcp://192.168.150.199:1521",
+  });
+});
+
+test("VpnService.getEnvironmentInfo does not run a data-plane probe", async () => {
+  const fakeRuntime = {
+    async describeActiveSession() {
+      return { token: "secret-token", sessionId: "session-1" };
+    },
+    async getLoginStatus() {
+      return { status: "1" };
+    },
+    async getServiceState() {
+      return { base: "18", l3vpn: "18", tcp: "43" };
+    },
+    async getLocalRuntimeInfo() {
+      return {};
+    },
+    async getBundleSettingPath() {
+      return null;
+    },
+    async getPort() {
+      return null;
+    },
+    async getGatewayCandidates() {
+      return [];
+    },
+    appExecutable: "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect",
+  };
+  const service = new VpnService({
+    runtimeFactory: () => fakeRuntime,
+    existsFn: async () => true,
+    dataPlaneProbeFn: async () => {
+      throw new Error("environment-only reads must not touch the probe target");
+    },
+  });
+
+  const info = await service.getEnvironmentInfo({
+    vpn: { dataPlaneProbeTarget: "tcp://192.0.2.10:1521" },
+  });
+
+  assert.equal(info.appExecutable, fakeRuntime.appExecutable);
 });
 
 test("VpnService.getSnapshot reports latest cached token only when no active session exists", async () => {
@@ -401,6 +506,9 @@ test("VpnService.repairOfficialUi reports incomplete when hidden service restore
       throw new Error("repairOfficialUi should not create gateway login");
     },
     existsFn: async () => true,
+    dataPlaneProbeFn: async () => {
+      throw new Error("repairOfficialUi must not run a second data-plane probe");
+    },
     delayFn: async (ms) => {
       delays.push(ms);
     },
@@ -4988,6 +5096,15 @@ test("VpnService.recoverAndLogin uses ensureOnline main path and redacts sensiti
   const service = new VpnService({
     runtimeFactory: () => fakeRuntime,
     gatewayLoginFactory: ({ host, port }) => ({ host, port, kind: "gateway-login" }),
+    dataPlaneProbeFn: async (config) => {
+      calls.push(["probeDataPlane", config.vpn.dataPlaneProbeTarget]);
+      return {
+        configured: true,
+        ok: true,
+        state: "reachable",
+        target: config.vpn.dataPlaneProbeTarget,
+      };
+    },
     ensureOnlineFn: async (options) => {
       calls.push({
         gatewayHost: options.gatewayHost,
@@ -5023,6 +5140,7 @@ test("VpnService.recoverAndLogin uses ensureOnline main path and redacts sensiti
         username: "demo-user",
         password: "secret",
         gateways: [{ host: "203.0.113.10", port: 9898 }],
+        dataPlaneProbeTarget: "tcp://192.168.150.199:1521",
       },
     },
     "demo-user",
@@ -5036,6 +5154,7 @@ test("VpnService.recoverAndLogin uses ensureOnline main path and redacts sensiti
   assert.equal(result.auth.summary.twfId, undefined);
   assert.equal(result.login.summary.effectiveTwfId, undefined);
   assert.equal(result.bridge.token, undefined);
+  assert.equal(result.dataPlane.ok, true);
   assert.deepEqual(result.gatewayAttempts, [{ gateway: "203.0.113.10:9898", ok: true }]);
   assert.deepEqual(calls, [
     {
@@ -5045,6 +5164,7 @@ test("VpnService.recoverAndLogin uses ensureOnline main path and redacts sensiti
       password: "secret",
       gatewayLoginKind: "gateway-login",
     },
+    ["probeDataPlane", "tcp://192.168.150.199:1521"],
   ]);
 });
 
