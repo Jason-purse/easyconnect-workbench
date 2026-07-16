@@ -5,7 +5,11 @@ import { ConfigStore } from "./services/config-store.js";
 import { VpnService } from "./services/vpn-service.js";
 import { VpnMaintainer } from "./services/vpn-maintainer.js";
 import { createVpnActionGuard } from "./services/vpn-action-guard.js";
-import { createBeforeQuitHandler } from "./services/app-shutdown.js";
+import {
+  createBeforeQuitHandler,
+  createRelaunchOnce,
+  drainShutdownTasks,
+} from "./services/app-shutdown.js";
 import { calculateInitialWindowBounds } from "./services/window-geometry.js";
 import { runOfficialUiRepairSmoke } from "./services/vpn-official-ui-repair-smoke.js";
 import { applyGatewaySelectionHint, applyProbeHints, applySnapshotHints } from "./services/vpn-config-hints.js";
@@ -18,6 +22,15 @@ import {
 } from "./services/vpn-autostart.js";
 import { buildTrayStatusLabels, buildTrayStatusSignature, buildTrayTooltip } from "./services/app-tray-state.js";
 import { createMaintainerLogger } from "./services/maintainer-log.js";
+import {
+  createAgentCommandServer,
+  createRetryableAgentCommandServerStarter,
+  getAgentSocketPath,
+} from "./services/agent-command-channel.js";
+import {
+  assertAgentMaintainerCredentials,
+  createVpnAgentController,
+} from "./services/vpn-agent-controller.js";
 import {
   assertMaintainerFailure,
   assertGatewayConfigUnchanged,
@@ -32,8 +45,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TRAY_REFRESH_INTERVAL_MS = 15000;
 const vpnActionGuard = createVpnActionGuard();
 const MAINTAINER_ACTION_COMPATIBILITY = {
-  "maintainer-initialize": ["maintainer-start"],
-  "maintainer-cycle": ["maintainer-start"],
+  "maintainer-start": ["maintainer-cycle"],
+  "maintainer-start-ignore-quiet-hours": ["maintainer-cycle"],
+  "maintainer-initialize": ["maintainer-start", "maintainer-start-ignore-quiet-hours"],
+  "maintainer-cycle": ["maintainer-start", "maintainer-start-ignore-quiet-hours"],
   "maintainer-stop": ["maintainer-cycle"],
 };
 
@@ -46,17 +61,26 @@ let configStore = null;
 let vpnService = null;
 let vpnMaintainer = null;
 let maintainerLogger = null;
+let agentCommandServerStarter = null;
+const scheduleHiddenRelaunch = createRelaunchOnce({
+  args: ["--hidden"],
+  relaunch: (options) => app.relaunch(options),
+});
 
 const handleBeforeQuit = createBeforeQuitHandler({
   onPrepare() {
     isQuitting = true;
+    agentCommandServerStarter?.stopAccepting();
     if (trayRefreshTimer) {
       clearInterval(trayRefreshTimer);
       trayRefreshTimer = null;
     }
   },
   stopMaintainer: () => vpnMaintainer?.stop(),
-  drainActions: () => vpnActionGuard.drain(),
+  drainActions: () => drainShutdownTasks([
+    () => agentCommandServerStarter?.stop(),
+    () => vpnActionGuard.drain(),
+  ]),
   quit: () => app.quit(),
 });
 
@@ -568,6 +592,90 @@ async function startMaintainerFromTray() {
 
 function stopMaintainerFromTray() {
   return runMaintainerAction("maintainer-stop", () => vpnMaintainer.stop());
+}
+
+function startMaintainerForAgent({ ignoreQuietHours = false, gatewayCandidates = [] } = {}) {
+  const actionKey = ignoreQuietHours
+    ? "maintainer-start-ignore-quiet-hours"
+    : "maintainer-start";
+  return runMaintainerAction(actionKey, async () => {
+    const config = await configStore.load();
+    if (ignoreQuietHours || vpnMaintainer.getStatus().running !== true) {
+      assertAgentMaintainerCredentials(config);
+    }
+    if (ignoreQuietHours) {
+      if (vpnMaintainer.getStatus().running) {
+        await vpnMaintainer.stop();
+      }
+      const status = await vpnMaintainer.start(
+        {
+          ...config,
+          vpn: {
+            ...(config.vpn ?? {}),
+            maintainerQuietHoursEnabled: false,
+          },
+        },
+        { gatewayCandidates },
+      );
+      updateTrayMenu();
+      return status;
+    }
+
+    const status = await startMaintainerWithQuietHoursGuard({
+      config,
+      vpnMaintainer,
+      gatewayCandidates,
+    });
+    updateTrayMenu();
+    return status;
+  });
+}
+
+function stopMaintainerForAgent() {
+  return runMaintainerAction("maintainer-stop", async () => {
+    const status = await vpnMaintainer.stop();
+    updateTrayMenu();
+    return status;
+  });
+}
+
+async function startAgentCommandServer() {
+  if (!agentCommandServerStarter) {
+    agentCommandServerStarter = createRetryableAgentCommandServerStarter({
+      createServer() {
+        const controller = createVpnAgentController({
+          configStore,
+          vpnService,
+          vpnMaintainer,
+          runVpnAction,
+          startMaintainer: startMaintainerForAgent,
+          stopMaintainer: stopMaintainerForAgent,
+        });
+        return createAgentCommandServer({
+          socketPath: getAgentSocketPath(app.getPath("userData")),
+          handleRequest: (request) => controller.handleRequest(request),
+        });
+      },
+    });
+  }
+
+  const agentCommandServer = await agentCommandServerStarter.start();
+  await writeAppEvent("agent-command-server-started", {
+    socketPath: agentCommandServer.socketPath,
+  });
+  return agentCommandServer;
+}
+
+async function reportAgentCommandServerFailure(error) {
+  console.error("[agent-command-server]", error);
+  await writeAppEvent("agent-command-server-failed", {
+    error: error?.message ?? String(error),
+    code: error?.code,
+  });
+}
+
+function retryAgentCommandServerStart() {
+  void startAgentCommandServer().catch(reportAgentCommandServerFailure);
 }
 
 function updateTrayMenu() {
@@ -1096,6 +1204,11 @@ app.whenReady().then(async () => {
     vpnMaintainer,
   });
   createAppTray();
+  try {
+    await startAgentCommandServer();
+  } catch (error) {
+    await reportAgentCommandServerFailure(error);
+  }
   if (!shouldStartHidden()) {
     createWindow();
   }
@@ -1106,7 +1219,15 @@ app.whenReady().then(async () => {
 });
 
 app.on("second-instance", (_event, argv) => {
-  if (isSmokeRun(argv) || shouldStartHidden(argv)) {
+  if (isQuitting && shouldStartHidden(argv)) {
+    scheduleHiddenRelaunch();
+    return;
+  }
+  if (isSmokeRun(argv)) {
+    return;
+  }
+  if (shouldStartHidden(argv)) {
+    retryAgentCommandServerStart();
     return;
   }
 

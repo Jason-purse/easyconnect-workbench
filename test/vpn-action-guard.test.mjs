@@ -193,7 +193,18 @@ test("main process routes every mutating IPC and tray entry point through the VP
   }
   assert.match(source, /scope:\s*"maintainer"/);
   assert.match(source, /allowWith/);
-  assert.match(source, /"maintainer-initialize":\s*\["maintainer-start"\]/);
+  assert.match(
+    source,
+    /"maintainer-initialize":\s*\["maintainer-start",\s*"maintainer-start-ignore-quiet-hours"\]/,
+  );
+  assert.match(
+    source,
+    /"maintainer-start-ignore-quiet-hours":\s*\["maintainer-cycle"\]/,
+  );
+  assert.match(
+    source,
+    /function startMaintainerForAgent[\s\S]{0,900}assertAgentMaintainerCredentials\(config\)[\s\S]{0,500}vpnMaintainer\.stop\(\)/,
+  );
   assert.match(source, /actionRunner:\s*runMaintainerAction/);
   assert.match(source, /dataPlaneProbeFn:\s*\(config, options\)\s*=>\s*vpnService\.probeDataPlane\(config, options\)/);
   assert.match(source, /onGatewaySelected:[\s\S]{0,240}configStore\.update/);

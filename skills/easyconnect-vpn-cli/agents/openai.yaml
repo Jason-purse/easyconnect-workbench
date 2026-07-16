@@ -1,0 +1,4 @@
+interface:
+  display_name: "EasyConnect VPN CLI"
+  short_description: "Verify and recover EasyConnect VPN for project work"
+  default_prompt: "Use $easyconnect-vpn-cli to verify VPN health before private-network project work."

@@ -1,4 +1,4 @@
-import { access, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -41,6 +41,25 @@ async function copyAppPayload() {
     recursive: true,
   });
   await copyLucideRuntime();
+  await copyCliEntry();
+  await copyAgentSkill();
+}
+
+async function copyCliEntry() {
+  const source = path.join(projectRoot, "bin", "easyconnect-vpn");
+  const target = path.join(resourcesDir, "bin", "easyconnect-vpn");
+  await assertExists(source, "EasyConnect VPN CLI wrapper is missing");
+  await mkdir(path.dirname(target), { recursive: true });
+  await cp(source, target);
+  await chmod(target, 0o755);
+}
+
+async function copyAgentSkill() {
+  const source = path.join(projectRoot, "skills", "easyconnect-vpn-cli");
+  const target = path.join(resourcesDir, "skills", "easyconnect-vpn-cli");
+  await assertExists(path.join(source, "SKILL.md"), "EasyConnect VPN CLI skill is missing");
+  await mkdir(path.dirname(target), { recursive: true });
+  await cp(source, target, { recursive: true });
 }
 
 async function copyLucideRuntime() {

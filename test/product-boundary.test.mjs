@@ -48,6 +48,32 @@ test("npm test includes the VPN-only product boundary and excludes platform test
   assert.doesNotMatch(packageJson.scripts.test, /platform-api-client/);
 });
 
+test("agent CLI stays a thin installed Workbench client", async () => {
+  const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+  const mainSource = await readFile("src/main.js", "utf8");
+  const packageSource = await readFile("scripts/package-macos.mjs", "utf8");
+  const wrapperSource = await readFile("bin/easyconnect-vpn", "utf8");
+
+  assert.equal(packageJson.scripts["install:cli"], "node scripts/install-cli.mjs");
+  assert.match(mainSource, /createAgentCommandServer/);
+  assert.match(mainSource, /createRetryableAgentCommandServerStarter/);
+  assert.match(mainSource, /createVpnAgentController/);
+  assert.match(mainSource, /agentCommandServerStarter\.start\(\)/);
+  assert.match(mainSource, /agentCommandServerStarter\?\.stopAccepting\(\)/);
+  assert.match(mainSource, /isQuitting\s*&&\s*shouldStartHidden\(argv\)/);
+  assert.match(mainSource, /scheduleHiddenRelaunch\(\)/);
+  assert.match(
+    mainSource,
+    /if \(shouldStartHidden\(argv\)\) \{[\s\S]{0,160}retryAgentCommandServerStart\(\)/,
+  );
+  assert.match(packageSource, /bin["'],\s*["']easyconnect-vpn/);
+  assert.match(packageSource, /chmod\(.*0o755/);
+  assert.match(wrapperSource, /ELECTRON_RUN_AS_NODE=1/);
+  assert.match(wrapperSource, /export EASYCONNECT_WORKBENCH_APP_PATH=/);
+  assert.match(wrapperSource, /Resources\/app\/src\/cli\/easyconnect-vpn\.js/);
+  assert.doesNotMatch(wrapperSource, /password|username/i);
+});
+
 test("installed verification replaces the app bundle instead of overlaying stale files", async () => {
   const source = await readFile("scripts/verify-mvp-installed.mjs", "utf8");
   const stageCopy = source.indexOf('await run("/usr/bin/ditto", [distApp, stagedApp])');

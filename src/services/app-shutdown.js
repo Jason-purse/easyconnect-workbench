@@ -18,6 +18,44 @@ function scheduleShutdownTask(schedule, task) {
   });
 }
 
+export async function drainShutdownTasks(tasks = []) {
+  if (!Array.isArray(tasks) || tasks.some((task) => typeof task !== "function")) {
+    throw new Error("drainShutdownTasks requires an array of functions");
+  }
+
+  const results = await Promise.allSettled(tasks.map(startShutdownTask));
+  const errors = results
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+  if (errors.length > 1) {
+    throw new AggregateError(errors, "Application shutdown drainage failed");
+  }
+}
+
+export function createRelaunchOnce({ relaunch, args = [] } = {}) {
+  if (typeof relaunch !== "function") {
+    throw new Error("createRelaunchOnce requires relaunch");
+  }
+
+  let scheduled = false;
+  return function scheduleRelaunch() {
+    if (scheduled) {
+      return false;
+    }
+    scheduled = true;
+    try {
+      relaunch({ args: [...args] });
+      return true;
+    } catch (error) {
+      scheduled = false;
+      throw error;
+    }
+  };
+}
+
 export function createBeforeQuitHandler({
   onPrepare = () => {},
   stopMaintainer = () => {},
@@ -47,11 +85,17 @@ export function createBeforeQuitHandler({
     shutdownPromise = Promise.allSettled([
       startShutdownTask(stopMaintainer),
       startShutdownTask(drainActions),
-    ]).then((results) => {
+    ]).then(async (results) => {
       for (const result of results) {
         if (result.status === "rejected") {
           logger?.error?.("application shutdown task failed", result.reason);
         }
+      }
+
+      try {
+        await startShutdownTask(stopMaintainer);
+      } catch (error) {
+        logger?.error?.("application final maintainer stop failed", error);
       }
 
       shutdownComplete = true;

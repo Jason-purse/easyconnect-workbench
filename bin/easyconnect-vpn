@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+APP_PATH="${EASYCONNECT_WORKBENCH_APP_PATH:-/Applications/EasyConnect Workbench.app}"
+APP_EXECUTABLE="$APP_PATH/Contents/MacOS/EasyConnect Workbench"
+CLI_SCRIPT="$APP_PATH/Contents/Resources/app/src/cli/easyconnect-vpn.js"
+export EASYCONNECT_WORKBENCH_APP_PATH="$APP_PATH"
+
+if [ ! -x "$APP_EXECUTABLE" ] || [ ! -f "$CLI_SCRIPT" ]; then
+  printf '%s\n' "EasyConnect Workbench CLI runtime is missing at: $APP_PATH" >&2
+  exit 4
+fi
+
+ELECTRON_RUN_AS_NODE=1 exec "$APP_EXECUTABLE" "$CLI_SCRIPT" "$@"

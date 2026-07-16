@@ -11,6 +11,27 @@ function createDeferred() {
   return { promise, resolve, reject };
 }
 
+test("shutdown drainage runs every task before propagating a stop failure", async () => {
+  const shutdownModule = await import("../src/services/app-shutdown.js");
+  assert.equal(typeof shutdownModule.drainShutdownTasks, "function");
+  const stopError = new Error("command server stop failed");
+  const calls = [];
+
+  await assert.rejects(
+    shutdownModule.drainShutdownTasks([
+      () => {
+        calls.push("server-stop");
+        throw stopError;
+      },
+      () => {
+        calls.push("action-drain");
+      },
+    ]),
+    (error) => error === stopError,
+  );
+  assert.deepEqual(calls, ["server-stop", "action-drain"]);
+});
+
 test("before-quit shutdown waits for maintainer and VPN action drainage", async () => {
   const shutdownModule = await import("../src/services/app-shutdown.js").catch(() => ({}));
   assert.equal(typeof shutdownModule.createBeforeQuitHandler, "function");
@@ -59,11 +80,40 @@ test("before-quit shutdown waits for maintainer and VPN action drainage", async 
   drainDeferred.resolve();
   await first;
   assert.equal(calls.at(-1), "quit");
+  assert.equal(calls.filter((item) => item === "stop-maintainer").length, 2);
 
   const completed = handler(createEvent("completed"));
   assert.equal(completed, undefined);
   assert.equal(calls.includes("prevent-completed"), false);
   assert.equal(calls.filter((item) => item === "quit").length, 1);
+});
+
+test("before-quit performs a final maintainer stop after accepted actions drain", async () => {
+  const shutdownModule = await import("../src/services/app-shutdown.js");
+  const drainDeferred = createDeferred();
+  let maintainerRunning = true;
+  let stopCalls = 0;
+  const handler = shutdownModule.createBeforeQuitHandler({
+    stopMaintainer() {
+      stopCalls += 1;
+      maintainerRunning = false;
+    },
+    async drainActions() {
+      await drainDeferred.promise;
+      maintainerRunning = true;
+    },
+    quit() {},
+  });
+
+  const shutdown = handler({ preventDefault() {} });
+  await Promise.resolve();
+  assert.equal(stopCalls, 1);
+  assert.equal(maintainerRunning, false);
+
+  drainDeferred.resolve();
+  await shutdown;
+  assert.equal(stopCalls, 2);
+  assert.equal(maintainerRunning, false);
 });
 
 test("before-quit defers the final quit request beyond the cancelled event turn", async () => {
@@ -93,11 +143,36 @@ test("before-quit defers the final quit request beyond the cancelled event turn"
 
   await Promise.resolve();
   await Promise.resolve();
+  for (let attempt = 0; attempt < 4 && scheduled.length === 0; attempt += 1) {
+    await Promise.resolve();
+  }
 
-  assert.deepEqual(calls, ["prevent", "stop-maintainer", "drain-actions"]);
+  assert.deepEqual(calls, [
+    "prevent",
+    "stop-maintainer",
+    "drain-actions",
+    "stop-maintainer",
+  ]);
   assert.equal(scheduled.length, 1);
 
   scheduled[0]();
   await shutdown;
   assert.equal(calls.at(-1), "quit");
+});
+
+test("shutdown relaunch scheduling queues exactly one hidden successor", async () => {
+  const shutdownModule = await import("../src/services/app-shutdown.js");
+  assert.equal(typeof shutdownModule.createRelaunchOnce, "function");
+
+  const calls = [];
+  const schedule = shutdownModule.createRelaunchOnce({
+    args: ["--hidden"],
+    relaunch(options) {
+      calls.push(options);
+    },
+  });
+
+  assert.equal(schedule(), true);
+  assert.equal(schedule(), false);
+  assert.deepEqual(calls, [{ args: ["--hidden"] }]);
 });

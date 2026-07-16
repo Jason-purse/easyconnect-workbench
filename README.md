@@ -61,6 +61,30 @@ The `.noindex` suffix keeps macOS Spotlight from showing the local build output 
 /Applications/EasyConnect Workbench.app
 ```
 
+## Agent CLI
+
+After installing the packaged app, install the command and its Codex skill:
+
+```bash
+npm run install:cli
+```
+
+The installer creates stable links at `~/.local/bin/easyconnect-vpn` and `$CODEX_HOME/skills/easyconnect-vpn-cli` (or `~/.codex/skills/easyconnect-vpn-cli`). Both links point into the installed app bundle and remain valid when that bundle is replaced in place.
+
+Use JSON output for scripts and agents:
+
+```bash
+easyconnect-vpn --json status
+easyconnect-vpn --json ensure
+easyconnect-vpn --json keepalive start
+easyconnect-vpn --json keepalive stop
+easyconnect-vpn --json config
+```
+
+`status` is read-only and succeeds only when the official control plane is online and the configured internal target is currently reachable through a `utun*` route. `ensure` is idempotent while healthy. When the control plane and tunneled route remain online but the internal target probe fails, each decision to recover or escalate to a forced client restart requires three consecutive fresh failures with 500 ms between attempts; any successful attempt avoids that recovery step. Mutating `ensure` and keepalive commands wait for Workbench's authoritative result instead of reporting a client timeout while the underlying VPN action continues; `--timeout-seconds` is accepted only by read-only `status` and `config`. Quiet hours are respected by default. Use `--ignore-quiet-hours` only for an explicit active task that requires VPN access during the configured pause.
+
+Exit code `0` means ready/success, `2` means invalid usage, `3` means VPN health or configuration is not ready, and `4` means the installed Workbench command service is unavailable. The CLI never returns the stored username or password, and session identifiers are masked in command output.
+
 ## Installed Smoke Verification
 
 `verify:mvp-installed` is intentionally local-environment dependent. It reads gateways from the saved Workbench config by default, or from `EASYCONNECT_VERIFY_GATEWAYS`.
